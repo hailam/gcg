@@ -10,11 +10,11 @@ import (
 
 	"github.com/atotto/clipboard"
 
-	"github.com/hailam/play-commit/internal/bootstrap"
-	"github.com/hailam/play-commit/internal/diff"
-	"github.com/hailam/play-commit/internal/git"
-	"github.com/hailam/play-commit/internal/llm"
-	"github.com/hailam/play-commit/internal/term"
+	"github.com/hailam/gcg/internal/bootstrap"
+	"github.com/hailam/gcg/internal/diff"
+	"github.com/hailam/gcg/internal/git"
+	"github.com/hailam/gcg/internal/llm"
+	"github.com/hailam/gcg/internal/term"
 )
 
 // Run executes the gcg flow. The load callback is only invoked when there

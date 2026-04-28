@@ -38,7 +38,7 @@ func TestReadFileSucceedsOnRepoFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "module github.com/hailam/play-commit") {
+	if !strings.Contains(out, "module github.com/hailam/gcg") {
 		t.Errorf("expected module declaration, got: %s", out)
 	}
 }
@@ -77,7 +77,7 @@ func TestReadFileNavigationHeader(t *testing.T) {
 	if !strings.HasPrefix(out, "[lines 1-2 of ") {
 		t.Errorf("expected navigation header, got: %s", out)
 	}
-	if !strings.Contains(out, "module github.com/hailam/play-commit") {
+	if !strings.Contains(out, "module github.com/hailam/gcg") {
 		t.Errorf("expected module declaration in body, got: %s", out)
 	}
 }

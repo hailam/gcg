@@ -19,8 +19,8 @@ import (
 
 	"github.com/ollama/ollama/api"
 
-	"github.com/hailam/play-commit/internal/term"
-	"github.com/hailam/play-commit/internal/tools"
+	"github.com/hailam/gcg/internal/term"
+	"github.com/hailam/gcg/internal/tools"
 )
 
 //go:embed conventional-commits.md

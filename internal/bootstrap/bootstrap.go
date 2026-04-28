@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/hailam/play-commit/internal/config"
+	"github.com/hailam/gcg/internal/config"
 )
 
 type App struct {

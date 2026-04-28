@@ -1,4 +1,4 @@
-module github.com/hailam/play-commit
+module github.com/hailam/gcg
 
 go 1.26.2
 
