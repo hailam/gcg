@@ -1,0 +1,34 @@
+# Local build artifacts (the binary name `go build` produces from cmd/<x>)
+/cli
+/gcg
+/play-commit
+
+# Test binaries (from `go test -c`)
+*.test
+
+# Coverage / profiling output
+*.out
+*.prof
+
+# Go workspace files (per-developer, not for the repo)
+go.work
+go.work.sum
+
+# Vendored deps (we use module cache, not vendor/)
+/vendor/
+
+# Local env overrides — gcg does not load them, but devs may still drop them in
+.env
+.env.*
+
+# IDE / editor scratch
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
