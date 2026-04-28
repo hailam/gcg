@@ -30,10 +30,16 @@ var conventionalCommitsSpec string
 const systemRules = `You generate git commit subjects from staged diffs.
 
 You have access to tools that can read files and list directories from the
-current git repository. Use them only when the staged diff doesn't show
-enough surrounding context (e.g. to see a function's full signature, a
-type definition, or to identify the right scope from sibling files). Don't
-read speculatively — most diffs are self-contained.
+current git repository. Prefer using them whenever the diff alone leaves
+you uncertain about ANY of these:
+  * What an exported symbol referenced by the diff actually does (its full
+    signature, callers, or whether it is part of a public API).
+  * The right scope when a path is in an unfamiliar layout — list_dir the
+    parent to see what siblings exist.
+  * Whether a removed/renamed identifier is genuinely public-facing
+    (read callers, route files, or migration history).
+An extra tool call is cheaper than a wrong commit subject — when in doubt,
+read.
 
 The tools only expose files that are part of this repository AND not
 matched by .gitignore. Files inside .git/ and ignored paths (build
@@ -53,8 +59,9 @@ Your final answer MUST be a JSON object with exactly these four fields:
 gcg assembles the final subject from these parts as
 "<type>[(<scope>)][!]: <description>" — do not concatenate yourself, do
 not include punctuation in the parts. Do not produce a code review, a
-summary, a list of changes, markdown formatting, multiple lines, or any
-prose outside the JSON.
+summary, a list of changes, multiple lines, or any prose outside the
+JSON. Do not wrap the JSON in markdown code fences (no `+"```"+`json or `+"```"+`).
+Output ONLY the bare JSON object, starting with `+"`{`"+` and ending with `+"`}`"+`.
 
 Field rules:
 - type: pick the one that best fits the primary intent. Multi-feature
@@ -81,6 +88,13 @@ Field rules:
 - description: imperative ("add", not "added"). Keep it short — the
   whole assembled subject should fit in 72 characters. Describe what
   changed and why it matters, not how. No trailing period.
+  CRITICAL: the description is JUST the summary. Do NOT include the
+  type or scope prefix in it. gcg prepends "<type>[(<scope>)]: "
+  itself when assembling the final subject, so writing
+  "refactor: implement X" or "feat(api): add Y" inside the
+  description value will produce a duplicated prefix in the output.
+  Correct: description="implement two-phase tool-calling flow".
+  Wrong:   description="refactor: implement two-phase tool-calling flow".
 
 Conventional Commits 1.0.0 reference — consult this when picking type or scope:
 
@@ -128,6 +142,13 @@ type ccParts struct {
 }
 
 func (p ccParts) Subject() string {
+	desc := strings.Join(strings.Fields(p.Description), " ")
+	// Some models leak the CC type prefix back into the description
+	// (e.g. description="refactor: implement X"), which would produce
+	// "refactor(scope): refactor: implement X" once we assemble. Strip
+	// any leading <type>(<scope>)?!?: pattern from the description.
+	desc = descPrefixRe.ReplaceAllString(desc, "")
+
 	var sb strings.Builder
 	sb.WriteString(p.Type)
 	if p.Scope != "" {
@@ -139,12 +160,13 @@ func (p ccParts) Subject() string {
 		sb.WriteString("!")
 	}
 	sb.WriteString(": ")
-	// strings.Fields collapses any internal whitespace (incl. stray
-	// newlines) into single spaces, so a multi-line description from the
-	// model gets flattened into a clean one-liner.
-	sb.WriteString(strings.Join(strings.Fields(p.Description), " "))
+	sb.WriteString(desc)
 	return sb.String()
 }
+
+var descPrefixRe = regexp.MustCompile(
+	`^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([\w./-]+\))?!?:\s*`,
+)
 
 var validCCType = map[string]bool{
 	"feat": true, "fix": true, "docs": true, "style": true,
@@ -181,6 +203,13 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 
 	useSpinner := stream != nil && term.IsTerminal(stream)
 
+	// Phase 1 — tool use. Format is intentionally NOT set here because in
+	// Ollama's grammar layer it biases the sampler against tool calls
+	// (the schema doesn't include tool-call shape, so the model heads
+	// straight for the schema-matching answer). Letting the model be free
+	// here gives tools a fair chance to fire.
+	var phase1Content string
+	phase1Done := false
 	for range maxToolIterations {
 		var sb strings.Builder
 		var toolCalls []api.ToolCall
@@ -190,19 +219,18 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 			sp = term.NewSpinner(stream, fmt.Sprintf("consulting %s…", model))
 		}
 
+		// Phase 1 disables streaming. Ollama's streaming chat with tools
+		// is unreliable for some models (gemma family in particular):
+		// tool_calls only appear in the terminal chunk and our streamed
+		// callback path can lose them. Non-streaming gives us a single
+		// response with tool_calls intact.
+		phase1Stream := false
 		req := &api.ChatRequest{
 			Model:    model,
 			Messages: messages,
 			Tools:    apiTools,
-			Stream:   &streamFlag,
-			Format:   json.RawMessage(subjectSchema),
+			Stream:   &phase1Stream,
 		}
-
-		// We accumulate the model's content silently rather than streaming
-		// it to the user. The content is JSON (per the Format constraint)
-		// and would just look like noisy `{"subj` token fragments. The
-		// spinner provides feedback during the wait; the extracted subject
-		// is printed as one clean line after parsing.
 		chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
 			sb.WriteString(resp.Message.Content)
 			if len(resp.Message.ToolCalls) > 0 {
@@ -218,24 +246,22 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		}
 
 		if len(toolCalls) == 0 {
-			subject, err := extractSubject(sb.String())
-			if err != nil {
-				return "", err
-			}
-			if stream != nil {
-				fmt.Fprintln(stream, subject)
-			}
-			return subject, nil
+			phase1Content = sb.String()
+			messages = append(messages, api.Message{
+				Role:    "assistant",
+				Content: phase1Content,
+			})
+			phase1Done = true
+			break
 		}
 
-		// Append the assistant turn (with its tool calls) to history.
+		// Tool calls: append the assistant turn, execute tools, feed
+		// results back as Role:"tool" messages.
 		messages = append(messages, api.Message{
 			Role:      "assistant",
 			Content:   sb.String(),
 			ToolCalls: toolCalls,
 		})
-
-		// Execute each tool call and append its result as a tool message.
 		for _, tc := range toolCalls {
 			args := tc.Function.Arguments.ToMap()
 			if stream != nil {
@@ -253,7 +279,56 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		}
 	}
 
-	return "", fmt.Errorf("tool-call iteration limit (%d) exceeded", maxToolIterations)
+	// Optimization: if Phase 1 already produced parseable JSON (the
+	// system prompt asks for it; well-behaved models comply), use it
+	// directly and skip Phase 2.
+	if phase1Done && phase1Content != "" {
+		if subject, err := extractSubject(phase1Content); err == nil {
+			if stream != nil {
+				fmt.Fprintln(stream, subject)
+			}
+			return subject, nil
+		}
+	}
+
+	// Phase 2 — structuring. Format constraint forces a JSON object
+	// matching subjectSchema. Tools are NOT declared here because the
+	// flow has already gathered the context it needs in Phase 1.
+	messages = append(messages, api.Message{
+		Role:    "user",
+		Content: "Now output ONLY the final JSON object as instructed: a single object with type, scope, breaking, and description. No prose, no tool calls.",
+	})
+
+	var sp *term.Spinner
+	if useSpinner {
+		sp = term.NewSpinner(stream, "structuring response…")
+	}
+	var sb strings.Builder
+	req := &api.ChatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   &streamFlag,
+		Format:   json.RawMessage(subjectSchema),
+	}
+	chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
+		sb.WriteString(resp.Message.Content)
+		return nil
+	})
+	if sp != nil {
+		sp.Stop()
+	}
+	if chatErr != nil {
+		return "", classifyErr(chatErr, model)
+	}
+
+	subject, err := extractSubject(sb.String())
+	if err != nil {
+		return "", err
+	}
+	if stream != nil {
+		fmt.Fprintln(stream, subject)
+	}
+	return subject, nil
 }
 
 // buildOllamaTools converts the registered MCP tool definitions into the
@@ -315,24 +390,34 @@ func buildOllamaTools() (api.Tools, error) {
 }
 
 // extractSubject parses the model's structured-output response into
-// ccParts and assembles the canonical subject string. The Format
-// constraint guarantees valid JSON matching subjectSchema, so the parse
-// should always succeed; if it doesn't (Ollama oddity, model unusable),
-// fall back to scanning for the first Conventional-Commits-shaped line in
-// the raw output.
+// ccParts and assembles the canonical subject string.
+//
+// The Format constraint *should* give us a clean JSON object, but in
+// practice models leak around it: markdown code fences (```json ... ```),
+// preamble text, trailing commentary. We try three parse strategies in
+// order — raw, fence-stripped, and brace-bounded — before falling back to
+// scanning for a Conventional-Commits-shaped line.
 func extractSubject(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("model returned empty response")
 	}
-	var parts ccParts
-	if err := json.Unmarshal([]byte(raw), &parts); err == nil && parts.Description != "" {
+
+	for _, candidate := range []string{raw, stripCodeFence(raw), extractJSONObject(raw)} {
+		if candidate == "" {
+			continue
+		}
+		var parts ccParts
+		if err := json.Unmarshal([]byte(candidate), &parts); err != nil || parts.Description == "" {
+			continue
+		}
 		if !validCCType[parts.Type] {
 			return "", fmt.Errorf("model produced invalid type %q (raw: %q)", parts.Type, raw)
 		}
 		return parts.Subject(), nil
 	}
-	// Fallback: a CC-shaped first line is better than nothing.
+
+	// Last resort: a CC-shaped line anywhere in the output.
 	for line := range strings.SplitSeq(raw, "\n") {
 		t := strings.TrimSpace(line)
 		if ccSubjectRe.MatchString(t) {
@@ -340,6 +425,35 @@ func extractSubject(raw string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("model output is not a usable subject (raw: %q)", raw)
+}
+
+// stripCodeFence removes a leading ```... line and a trailing ``` so a
+// fenced JSON block becomes parseable.
+func stripCodeFence(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[i+1:]
+		}
+	}
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
+// extractJSONObject returns the substring from the first '{' to the last
+// '}' — a permissive way to recover an object embedded in surrounding
+// prose. Doesn't validate balance; the json.Unmarshal does that.
+func extractJSONObject(s string) string {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return ""
+	}
+	end := strings.LastIndexByte(s, '}')
+	if end <= start {
+		return ""
+	}
+	return s[start : end+1]
 }
 
 var ccSubjectRe = regexp.MustCompile(`^[a-z]+(\([\w./-]+\))?!?:\s+\S`)
