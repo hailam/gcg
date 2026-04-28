@@ -91,35 +91,72 @@ var (
 		"connecting the dots",
 		"squinting at the diff",
 		"musing",
-		"visnanee",       // dv: thinking
-		"visnamun",       // dv: while pondering
-		"hithah aranee",  // dv: it's coming to mind
-		"loa hulhuvanee", // dv: opening the eyes (taking it in)
+		"parsing intent",
+		"tracing logic",
+		"brewing thoughts",
+		"untangling the prompt",
+		"crunching context",
+		"visnanee",        // dv: thinking
+		"visnamun",        // dv: while pondering
+		"funah visnanee",  // dv: thinking deeply / diving deep
+		"raavanee",        // dv: planning / structuring the idea
+		"hithah aranee",   // dv: it's coming to mind
+		"loa hulhuvanee",  // dv: opening the eyes (taking it in)
+		"maana hoadhanee", // dv: finding the meaning / interpreting
+		"goiy nimmamun",   // dv: while making a decision
 	}
 	MsgsToolReading = []string{
 		"peeking at the file",
 		"reading the source",
 		"checking callers",
 		"following the trail",
-		"kiyanee",    // dv: reading
-		"balaalanee", // dv: taking a look
+		"scanning the text",
+		"digging in",
+		"inspecting contents",
+		"grokking the source",
+		"deciphering",
+		"parsing the bytes",
+		"kiyanee",             // dv: reading
+		"balaalanee",          // dv: taking a quick look
+		"thafseel balanee",    // dv: checking the details
+		"diraasaa kuranee",    // dv: analyzing / studying
+		"aslu balanee",        // dv: looking at the root/source
+		"etheyreyah fethumun", // dv: while diving inside (the file)
 	}
 	MsgsToolListing = []string{
 		"listing siblings",
 		"surveying the layout",
 		"mapping the package",
 		"looking around",
-		"hoadhamun", // dv: while searching
-		"balanee",   // dv: looking
+		"scanning the tree",
+		"gathering paths",
+		"indexing",
+		"scouting the perimeter",
+		"walking the tree",
+		"hoadhanee",           // dv: while searching
+		"balanee",             // dv: looking
+		"vashaigen balanee",   // dv: looking all around
+		"tharitheeb balanee",  // dv: checking the arrangement/order
+		"vashaigen hoadhanee", // dv: searching the surroundings
+		"hisaabu balanee",     // dv: checking the area/bounds
 	}
 	MsgsStructuring = []string{
 		"structuring the response",
 		"polishing the subject",
 		"shaping JSON",
 		"tightening the wording",
-		"liyamun",     // dv: while writing
-		"nimmanee",    // dv: finishing up
-		"saafkuranee", // dv: tidying up
+		"assembling pieces",
+		"drafting the reply",
+		"crossing the t's",
+		"weaving the output",
+		"compiling the answer",
+		"liyamun",          // dv: while writing
+		"nimmanee",         // dv: finishing up
+		"saafkuranee",      // dv: tidying up / cleaning
+		"furihama kuranee", // dv: perfecting / completing
+		"reethi kuranee",   // dv: polishing / making it presentable
+		"ekulavaalanee",    // dv: compiling / putting together
+		"javaabu raavanee", // dv: structuring the answer
 	}
 )
 
