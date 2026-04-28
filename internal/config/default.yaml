@@ -1,0 +1,11 @@
+app:
+  name: ${APP_NAME|gcg}
+  env: ${APP_ENV|development}
+  version: ${APP_VERSION|0.0.0}
+
+llm:
+  host: ${OLLAMA_HOST|http://localhost:11434}
+  model: ${GCG_MODEL|gemma4:e4b}
+
+diff:
+  max_bytes: ${GCG_DIFF_MAX_BYTES|204800}
