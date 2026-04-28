@@ -1,26 +1,44 @@
 // Package llm wraps the Ollama chat API: send a user prompt with the
-// hardcoded gcg system prompt, stream chunks to a writer, return the full
-// assembled string. Also owns post-processing that trims model output to
-// the gcg subject contract.
+// hardcoded gcg system prompt, drive a tool-calling loop until the model
+// produces a final answer, and post-process the result. Tools are
+// MCP-shaped definitions registered in internal/tools and dispatched
+// in-process.
 package llm
 
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/ollama/ollama/api"
+
+	"github.com/hailam/play-commit/internal/tools"
 )
 
 //go:embed conventional-commits.md
 var conventionalCommitsSpec string
 
 const systemRules = `You write git commit message subjects from staged diffs.
+
+You have access to tools that can read files and list directories from the
+current git repository. Use them only when the staged diff doesn't show
+enough surrounding context (e.g. to see a function's full signature, a
+type definition, or to identify the right scope from sibling files). Don't
+read speculatively — most diffs are self-contained.
+
+The tools only expose files that are part of this repository AND not
+matched by .gitignore. Files inside .git/ and ignored paths (build
+artifacts, credentials, local dotfiles, vendored dependencies) are
+strictly off-limits — the tools will refuse them. Do not try to bypass
+this; there is nothing to read in those locations that matters for a
+commit subject.
 
 Rules:
 - Output exactly one line.
@@ -42,9 +60,15 @@ Conventional Commits 1.0.0 reference — consult this when picking type or scope
 
 var systemPrompt = systemRules + conventionalCommitsSpec
 
-// Generate sends userPrompt to the Ollama instance at host using model.
-// Each chunk is written to stream as it arrives (pass nil to skip
-// streaming output). The full assembled response is returned.
+// maxToolIterations caps the chat-loop length so a misbehaving model can't
+// spin in tool calls forever.
+const maxToolIterations = 5
+
+// Generate sends userPrompt to the Ollama instance at host using model and
+// drives a chat loop that handles any tool calls in-process. Each chunk is
+// written to stream as it arrives (pass nil to skip streaming output).
+// Returns the final-turn assistant content (the actual subject) — earlier
+// turns' content is streamed for visibility but not returned.
 func Generate(ctx context.Context, host, model, userPrompt string, stream io.Writer) (string, error) {
 	u, err := url.Parse(host)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -52,31 +76,144 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	}
 	client := api.NewClient(u, http.DefaultClient)
 
-	streamFlag := true
-	req := &api.ChatRequest{
-		Model:  model,
-		Stream: &streamFlag,
-		Messages: []api.Message{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
+	apiTools, err := buildOllamaTools()
+	if err != nil {
+		return "", fmt.Errorf("build tools: %w", err)
+	}
+	streamFlag := stream != nil
+
+	messages := []api.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
 	}
 
-	var sb strings.Builder
-	chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
-		if stream != nil {
-			_, _ = io.WriteString(stream, resp.Message.Content)
+	for range maxToolIterations {
+		var sb strings.Builder
+		var toolCalls []api.ToolCall
+
+		req := &api.ChatRequest{
+			Model:    model,
+			Messages: messages,
+			Tools:    apiTools,
+			Stream:   &streamFlag,
 		}
-		sb.WriteString(resp.Message.Content)
-		return nil
-	})
-	if stream != nil {
-		_, _ = io.WriteString(stream, "\n")
+
+		chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
+			if stream != nil && resp.Message.Content != "" {
+				_, _ = io.WriteString(stream, resp.Message.Content)
+			}
+			sb.WriteString(resp.Message.Content)
+			if len(resp.Message.ToolCalls) > 0 {
+				toolCalls = append(toolCalls, resp.Message.ToolCalls...)
+			}
+			return nil
+		})
+		if stream != nil && sb.Len() > 0 {
+			_, _ = io.WriteString(stream, "\n")
+		}
+		if chatErr != nil {
+			return "", classifyErr(chatErr, model)
+		}
+
+		if len(toolCalls) == 0 {
+			return sb.String(), nil
+		}
+
+		// Append the assistant turn (with its tool calls) to history.
+		messages = append(messages, api.Message{
+			Role:      "assistant",
+			Content:   sb.String(),
+			ToolCalls: toolCalls,
+		})
+
+		// Execute each tool call and append its result as a tool message.
+		for _, tc := range toolCalls {
+			args := tc.Function.Arguments.ToMap()
+			if stream != nil {
+				fmt.Fprintf(stream, "[%s%s]\n", tc.Function.Name, formatArgs(args))
+			}
+			result, execErr := tools.Execute(ctx, tc.Function.Name, args)
+			if execErr != nil {
+				result = "Error: " + execErr.Error()
+			}
+			messages = append(messages, api.Message{
+				Role:    "tool",
+				Content: result,
+			})
+		}
 	}
-	if chatErr != nil {
-		return "", classifyErr(chatErr, model)
+
+	return "", fmt.Errorf("tool-call iteration limit (%d) exceeded", maxToolIterations)
+}
+
+// buildOllamaTools converts the registered MCP tool definitions into the
+// structured Tool/ToolFunction/ToolPropertiesMap shape that Ollama's API
+// requires. The MCP InputSchema is JSON Schema in a json.RawMessage; we
+// re-parse it into a small intermediate struct and copy fields across.
+func buildOllamaTools() (api.Tools, error) {
+	available := tools.All()
+	out := make(api.Tools, 0, len(available))
+	for _, t := range available {
+		var rawSchema []byte
+		switch s := t.Def.InputSchema.(type) {
+		case json.RawMessage:
+			rawSchema = s
+		case []byte:
+			rawSchema = s
+		default:
+			b, err := json.Marshal(s)
+			if err != nil {
+				return nil, fmt.Errorf("tool %q: marshal schema: %w", t.Def.Name, err)
+			}
+			rawSchema = b
+		}
+
+		var schema struct {
+			Type       string   `json:"type"`
+			Required   []string `json:"required"`
+			Properties map[string]struct {
+				Type        string `json:"type"`
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(rawSchema, &schema); err != nil {
+			return nil, fmt.Errorf("tool %q: parse schema: %w", t.Def.Name, err)
+		}
+
+		props := api.NewToolPropertiesMap()
+		for name, p := range schema.Properties {
+			props.Set(name, api.ToolProperty{
+				Type:        api.PropertyType{p.Type},
+				Description: p.Description,
+			})
+		}
+
+		out = append(out, api.Tool{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name:        t.Def.Name,
+				Description: t.Def.Description,
+				Parameters: api.ToolFunctionParameters{
+					Type:       schema.Type,
+					Required:   schema.Required,
+					Properties: props,
+				},
+			},
+		})
 	}
-	return sb.String(), nil
+	return out, nil
+}
+
+func formatArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return "()"
+	}
+	parts := make([]string, 0, len(args))
+	for k, v := range args {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+	}
+	sort.Strings(parts)
+	return "(" + strings.Join(parts, ", ") + ")"
 }
 
 func classifyErr(err error, model string) error {

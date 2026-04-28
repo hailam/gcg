@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -25,9 +26,12 @@ func WithConfigFile(p string) Option { return func(o *options) { o.configPath = 
 func Load(out any, opts ...Option) error {
 	o := &options{}
 	for _, opt := range opts {
+		slog.Debug("applying config loader option", "option", fmt.Sprintf("%T", opt))
 		opt(o)
 	}
+
 	if o.configPath == "" {
+		slog.Info("no config file specified; using default", "path", "config/app.yaml")
 		wd, _ := os.Getwd()
 		o.configPath = filepath.Join(wd, "config", "app.yaml")
 	}
@@ -40,9 +44,12 @@ func Load(out any, opts ...Option) error {
 	c := gconfig.NewWithOptions("app", gconfig.ParseEnv, gconfig.ParseTime, gconfig.WithTagName("yaml"))
 	c.AddDriver(yamlv3.Driver)
 	if err := c.LoadFiles(o.configPath); err != nil {
+		slog.Error("error loading config file", "error", err)
 		return fmt.Errorf("config: load %s: %w", o.configPath, err)
 	}
+
 	if err := c.Decode(out); err != nil {
+		slog.Error("error decoding config", "error", err)
 		return fmt.Errorf("config: decode: %w", err)
 	}
 	return nil
