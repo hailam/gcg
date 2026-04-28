@@ -42,30 +42,45 @@ strictly off-limits — the tools will refuse them. Do not try to bypass
 this; there is nothing to read in those locations that matters for a
 commit subject.
 
-Your final answer MUST be a JSON object of the form:
-  {"subject": "<the commit subject>"}
+Your final answer MUST be a JSON object with exactly these four fields:
+  {
+    "type":        "<one of feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert>",
+    "scope":       "<single noun, or \"\" when the change spans unrelated areas>",
+    "breaking":    <true or false>,
+    "description": "<imperative-mood summary>"
+  }
 
-Do not produce a code review, a summary, a list of changes, markdown
-formatting, multiple lines, or any prose. The "subject" string itself is
-the entire output the user cares about.
+gcg assembles the final subject from these parts as
+"<type>[(<scope>)][!]: <description>" — do not concatenate yourself, do
+not include punctuation in the parts. Do not produce a code review, a
+summary, a list of changes, markdown formatting, multiple lines, or any
+prose outside the JSON.
 
-The subject value must follow these rules:
-- Exactly one line.
-- Conventional Commits format: <type>[(<scope>)][!]: <description>
-- Pick the type that best fits the change. Never omit the type prefix.
-- Include a scope when the change clearly belongs to one area. Identify it
-  from the staged file paths: a single Go package → its name (e.g.
-  internal/git/* → fix(git):), a top-level module → that name (e.g.
-  cmd/gcg/* → fix(gcg):), a feature folder for other stacks (e.g.
-  app/Domains/Operations/* → feat(operations):). Omit only when the change
-  spans unrelated areas.
-- For commits introducing or rolling out a system (feature flags, auth
-  layer, etc.), prefer that as the scope: feat(pennant):, feat(auth):.
-- Mark breaking changes with ! immediately before the colon.
-- Imperative mood ("add", not "added").
-- 72 characters or fewer total.
-- No trailing period, quotes, or backticks.
-- Describe what changed and why it matters, not how it was implemented.
+Field rules:
+- type: pick the one that best fits the primary intent. Multi-feature
+  commits typically take the dominant type (feat for new behavior,
+  refactor for restructures, chore for misc).
+- scope: identify the area from staged paths. A single Go package → its
+  name (internal/git/* → "git"); a top-level module → that name
+  (cmd/gcg/* → "gcg"); a feature folder for other stacks (e.g.
+  app/Domains/Operations/* → "operations"). For commits introducing or
+  rolling out a system (feature flags, auth layer), prefer that system
+  as the scope: "pennant", "auth", "billing". Use "" only when the
+  change genuinely spans unrelated areas.
+- breaking: true if and only if this change is backward-incompatible.
+  Strong signals to set breaking=true:
+    * Removal of an exported function, type, method, constant, or variable.
+    * Change to an exported function/method signature (parameters, return type).
+    * Removal or rename of a public HTTP route, RPC method, or CLI flag.
+    * Removal or rename of a database column referenced by application code.
+    * Change to a published config schema or environment-variable contract.
+    * Removal of a published feature, plugin hook, or extension point.
+  NOT breaking: adding new exported symbols, internal-only refactors,
+  changes to tests, docs, build/CI, vendored deps. When in doubt and the
+  diff only adds or modifies internal code, set breaking=false.
+- description: imperative ("add", not "added"). Keep it short — the
+  whole assembled subject should fit in 72 characters. Describe what
+  changed and why it matters, not how. No trailing period.
 
 Conventional Commits 1.0.0 reference — consult this when picking type or scope:
 
@@ -73,21 +88,69 @@ Conventional Commits 1.0.0 reference — consult this when picking type or scope
 
 var systemPrompt = systemRules + conventionalCommitsSpec
 
-// subjectSchema constrains the model's content output to a JSON object
-// with a single "subject" string. Ollama enforces this at the grammar
-// layer, so the model cannot emit prose, markdown, or multi-line reviews
-// even when the staged diff is overwhelming. Tool calls are unaffected
-// (they're a separate response path).
+// subjectSchema constrains the model's content output to the four parts of
+// a Conventional Commits subject. Ollama enforces this at the grammar
+// layer, so the model cannot emit prose, markdown, multi-line reviews, or
+// invalid types — and gcg owns the punctuation when assembling the final
+// string. Tool calls are unaffected (they're a separate response path).
 const subjectSchema = `{
 	"type": "object",
 	"properties": {
-		"subject": {
+		"type": {
 			"type": "string",
-			"description": "Conventional Commits subject line, one line, 72 chars or fewer"
+			"enum": ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"],
+			"description": "Conventional Commits type — the one that best fits the primary intent of the change"
+		},
+		"scope": {
+			"type": "string",
+			"description": "Single noun for the area touched (package name, module, feature folder). Use empty string when the change spans unrelated areas."
+		},
+		"breaking": {
+			"type": "boolean",
+			"description": "True only when this is a backward-incompatible change"
+		},
+		"description": {
+			"type": "string",
+			"description": "Imperative-mood summary of what changed and why it matters. \"add\", not \"added\". No trailing period."
 		}
 	},
-	"required": ["subject"]
+	"required": ["type","scope","breaking","description"]
 }`
+
+// ccParts mirrors the JSON schema. The model fills it in; gcg builds the
+// final subject string itself, so formatting drift (capitalization,
+// punctuation) is impossible.
+type ccParts struct {
+	Type        string `json:"type"`
+	Scope       string `json:"scope"`
+	Breaking    bool   `json:"breaking"`
+	Description string `json:"description"`
+}
+
+func (p ccParts) Subject() string {
+	var sb strings.Builder
+	sb.WriteString(p.Type)
+	if p.Scope != "" {
+		sb.WriteString("(")
+		sb.WriteString(p.Scope)
+		sb.WriteString(")")
+	}
+	if p.Breaking {
+		sb.WriteString("!")
+	}
+	sb.WriteString(": ")
+	// strings.Fields collapses any internal whitespace (incl. stray
+	// newlines) into single spaces, so a multi-line description from the
+	// model gets flattened into a clean one-liner.
+	sb.WriteString(strings.Join(strings.Fields(p.Description), " "))
+	return sb.String()
+}
+
+var validCCType = map[string]bool{
+	"feat": true, "fix": true, "docs": true, "style": true,
+	"refactor": true, "perf": true, "test": true, "build": true,
+	"ci": true, "chore": true, "revert": true,
+}
 
 // maxToolIterations caps the chat-loop length so a misbehaving model can't
 // spin in tool calls forever.
@@ -251,21 +314,23 @@ func buildOllamaTools() (api.Tools, error) {
 	return out, nil
 }
 
-// extractSubject parses the model's structured-output response and
-// returns the subject string. The Format constraint guarantees valid JSON
-// matching subjectSchema, so the parse should always succeed; if it
-// doesn't (model misbehavior, Ollama oddity), fall back to scanning for
-// the first Conventional-Commits-shaped line in the raw output.
+// extractSubject parses the model's structured-output response into
+// ccParts and assembles the canonical subject string. The Format
+// constraint guarantees valid JSON matching subjectSchema, so the parse
+// should always succeed; if it doesn't (Ollama oddity, model unusable),
+// fall back to scanning for the first Conventional-Commits-shaped line in
+// the raw output.
 func extractSubject(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("model returned empty response")
 	}
-	var parsed struct {
-		Subject string `json:"subject"`
-	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err == nil && parsed.Subject != "" {
-		return parsed.Subject, nil
+	var parts ccParts
+	if err := json.Unmarshal([]byte(raw), &parts); err == nil && parts.Description != "" {
+		if !validCCType[parts.Type] {
+			return "", fmt.Errorf("model produced invalid type %q (raw: %q)", parts.Type, raw)
+		}
+		return parts.Subject(), nil
 	}
 	// Fallback: a CC-shaped first line is better than nothing.
 	for line := range strings.SplitSeq(raw, "\n") {
