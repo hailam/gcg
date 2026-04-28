@@ -66,6 +66,9 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 	if err := clipboard.WriteAll(cleaned); err != nil {
 		return fmt.Errorf("clipboard: %w", err)
 	}
-	fmt.Fprintln(os.Stdout, term.Green(os.Stdout, "✓ copied to clipboard: "+cleaned))
+	// Two-row final: the subject is the deliverable (bright, eye-
+	// catching); the clipboard confirmation is the side-effect (dim).
+	fmt.Fprintln(os.Stdout, term.BoldCyan(os.Stdout, cleaned))
+	fmt.Fprintln(os.Stdout, term.DimGreen(os.Stdout, "✓ copied to clipboard"))
 	return nil
 }

@@ -179,10 +179,11 @@ var validCCType = map[string]bool{
 const maxToolIterations = 5
 
 // Generate sends userPrompt to the Ollama instance at host using model and
-// drives a chat loop that handles any tool calls in-process. Each chunk is
-// written to stream as it arrives (pass nil to skip streaming output).
-// Returns the final-turn assistant content (the actual subject) — earlier
-// turns' content is streamed for visibility but not returned.
+// drives a chat loop that handles any tool calls in-process. When stream
+// is a TTY, live thinking content is rendered into a rolling viewport
+// with an embedded spinner; tool invocations are echoed inline. The
+// final subject string is returned — Generate does NOT print it, so the
+// caller owns final-output formatting.
 func Generate(ctx context.Context, host, model, userPrompt string, stream io.Writer) (string, error) {
 	u, err := url.Parse(host)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -241,15 +242,15 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 				toolCalls = append(toolCalls, resp.Message.ToolCalls...)
 			}
 			if useUI && resp.Message.Thinking != "" {
-				// First thinking chunk: hand off the line from the
-				// spinner to the viewport so they don't fight over the
-				// same writer.
+				// First thinking chunk: hand off from the standalone
+				// spinner to the viewport (which has its own spinner
+				// row) so they don't fight over the same writer.
 				if sp != nil {
 					sp.Stop()
 					sp = nil
 				}
 				if vp == nil {
-					vp = term.NewViewport(stream, 4)
+					vp = term.NewViewport(stream, 4, term.MsgsThinking)
 				}
 				_, _ = vp.Write([]byte(resp.Message.Thinking))
 			}
@@ -301,12 +302,10 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 
 	// Optimization: if Phase 1 already produced parseable JSON (the
 	// system prompt asks for it; well-behaved models comply), use it
-	// directly and skip Phase 2.
+	// directly and skip Phase 2. The caller owns presentation of the
+	// final subject.
 	if phase1Done && phase1Content != "" {
 		if subject, err := extractSubject(phase1Content); err == nil {
-			if stream != nil {
-				fmt.Fprintln(stream, subject)
-			}
 			return subject, nil
 		}
 	}
@@ -340,7 +339,7 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 				sp = nil
 			}
 			if vp == nil {
-				vp = term.NewViewport(stream, 4)
+				vp = term.NewViewport(stream, 4, term.MsgsStructuring)
 			}
 			_, _ = vp.Write([]byte(resp.Message.Thinking))
 		}
@@ -359,9 +358,6 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	subject, err := extractSubject(sb.String())
 	if err != nil {
 		return "", err
-	}
-	if stream != nil {
-		fmt.Fprintln(stream, subject)
 	}
 	return subject, nil
 }

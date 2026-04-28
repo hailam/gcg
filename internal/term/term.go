@@ -8,6 +8,7 @@ package term
 import (
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"sync"
 	"time"
@@ -22,10 +23,18 @@ import (
 const (
 	AnsiReset  = "\033[0m"
 	AnsiDim    = "\033[2m"
+	AnsiBold   = "\033[1m"
 	AnsiRed    = "\033[31m"
 	AnsiGreen  = "\033[32m"
 	AnsiYellow = "\033[33m"
 	AnsiCyan   = "\033[36m"
+
+	// Combined attributes — terminals honor "dim" or "bold" attribute
+	// state at the same time as a color, but stacking two separate ANSI
+	// wrappers (each with its own reset) drops the outer attribute on
+	// many terminals. Use a single CSI to keep both alive.
+	ansiBoldCyan = "\033[1;36m"
+	ansiDimGreen = "\033[2;32m"
 )
 
 // IsTerminal reports whether w is an interactive terminal (a character
@@ -52,13 +61,19 @@ func colorize(w io.Writer, code, text string) string {
 	return code + text + AnsiReset
 }
 
-// Dim, Cyan, Green, Yellow, Red return text wrapped in the corresponding
-// ANSI color when w is an interactive terminal.
+// Dim, Bold, Cyan, Green, Yellow, Red return text wrapped in the
+// corresponding ANSI attribute when w is an interactive terminal.
 func Dim(w io.Writer, text string) string    { return colorize(w, AnsiDim, text) }
+func Bold(w io.Writer, text string) string   { return colorize(w, AnsiBold, text) }
 func Cyan(w io.Writer, text string) string   { return colorize(w, AnsiCyan, text) }
 func Green(w io.Writer, text string) string  { return colorize(w, AnsiGreen, text) }
 func Yellow(w io.Writer, text string) string { return colorize(w, AnsiYellow, text) }
 func Red(w io.Writer, text string) string    { return colorize(w, AnsiRed, text) }
+
+// BoldCyan and DimGreen apply two attributes in a single ANSI sequence.
+// Use these instead of nesting Bold(Cyan(...)) — see ansiBoldCyan note.
+func BoldCyan(w io.Writer, text string) string { return colorize(w, ansiBoldCyan, text) }
+func DimGreen(w io.Writer, text string) string { return colorize(w, ansiDimGreen, text) }
 
 // Phase-tagged status verb pools. Spinner cycles through these so the
 // loading line feels alive across long calls without manual
@@ -143,7 +158,6 @@ func NewSpinnerPool(w io.Writer, msgs []string) *Spinner {
 
 func (s *Spinner) loop() {
 	defer close(s.done)
-	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	t := time.NewTicker(80 * time.Millisecond)
 	defer t.Stop()
 
@@ -155,21 +169,22 @@ func (s *Spinner) loop() {
 		fmt.Fprintf(s.w, "\r\033[K%s", Dim(s.w, frame+" "+msg+"…"))
 	}
 
-	frameIdx, msgIdx, tickCount := 0, 0, 0
-	render(frames[frameIdx], s.msgs[msgIdx])
+	frameIdx, tickCount := 0, 0
+	msgIdx := rand.IntN(len(s.msgs))
+	render(spinnerFrames[frameIdx], s.msgs[msgIdx])
 	for {
 		select {
 		case <-s.stop:
 			fmt.Fprint(s.w, "\r\033[K")
 			return
 		case <-t.C:
-			frameIdx = (frameIdx + 1) % len(frames)
+			frameIdx = (frameIdx + 1) % len(spinnerFrames)
 			tickCount++
 			if tickCount >= ticksPerMessage && len(s.msgs) > 1 {
 				tickCount = 0
-				msgIdx = (msgIdx + 1) % len(s.msgs)
+				msgIdx = pickNextMsg(s.msgs, msgIdx)
 			}
-			render(frames[frameIdx], s.msgs[msgIdx])
+			render(spinnerFrames[frameIdx], s.msgs[msgIdx])
 		}
 	}
 }
@@ -185,35 +200,94 @@ func (s *Spinner) Stop() {
 	})
 }
 
-// Viewport renders streamed text into a fixed-height rolling window
-// using ANSI cursor controls so each Write redraws the same lines in
-// place. Token-sized chunks from the LLM produce a typewriter feel on
-// the live partial line; completed lines scroll up out of view.
+// Viewport renders streamed text into a fixed-height rolling window —
+// the top (height-1) lines are a thinking transcript that scrolls up as
+// new lines arrive; the bottom line is an animated spinner with a
+// rotating message pool so the loading indicator stays alive even when
+// no chunks are arriving. Token-sized chunks from the LLM produce a
+// typewriter feel on the live partial line.
 //
-// On a non-terminal writer Write becomes a no-op so piped output stays
-// clean. Not safe to use concurrently with another writer to the same
-// stream — Stop the viewport before printing other content.
+// A goroutine ticks the spinner at 80ms regardless of chunk activity;
+// Write and tick redraws share a mutex so the screen stays coherent. On
+// a non-terminal writer Write becomes a no-op and no goroutine is
+// started, so piped output stays clean.
 type Viewport struct {
-	w        io.Writer
-	height   int
+	w      io.Writer
+	height int
+	msgs   []string
+
 	finished []string
 	current  string
 	rendered bool
-	mu       sync.Mutex
+
+	frameIdx  int
+	msgIdx    int
+	tickCount int
+
+	mu   sync.Mutex
+	stop chan struct{}
+	done chan struct{}
+	once sync.Once
 }
 
-// NewViewport creates a height-line viewport on w. height < 1 falls
-// back to 4.
-func NewViewport(w io.Writer, height int) *Viewport {
-	if height < 1 {
+// NewViewport creates a height-line viewport on w with msgs cycling in
+// the bottom spinner row. height < 2 is bumped to 4 (room for at least
+// one thinking line plus the spinner). Empty msgs falls back to a
+// generic "working".
+func NewViewport(w io.Writer, height int, msgs []string) *Viewport {
+	if height < 2 {
 		height = 4
 	}
-	return &Viewport{w: w, height: height}
+	if len(msgs) == 0 {
+		msgs = []string{"working"}
+	}
+	v := &Viewport{
+		w:      w,
+		height: height,
+		msgs:   msgs,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	if IsTerminal(w) {
+		go v.tick()
+	} else {
+		close(v.done)
+	}
+	return v
 }
 
-// Write feeds streamed text into the viewport, splitting on '\n' and
-// redrawing after each chunk so partial lines update character-by-
-// character as tokens stream in.
+func (v *Viewport) tick() {
+	defer close(v.done)
+	t := time.NewTicker(80 * time.Millisecond)
+	defer t.Stop()
+	const ticksPerMessage = 18
+
+	v.mu.Lock()
+	v.msgIdx = rand.IntN(len(v.msgs))
+	v.draw()
+	v.mu.Unlock()
+
+	for {
+		select {
+		case <-v.stop:
+			return
+		case <-t.C:
+			v.mu.Lock()
+			v.frameIdx = (v.frameIdx + 1) % len(spinnerFrames)
+			v.tickCount++
+			if v.tickCount >= ticksPerMessage && len(v.msgs) > 1 {
+				v.tickCount = 0
+				v.msgIdx = pickNextMsg(v.msgs, v.msgIdx)
+			}
+			v.draw()
+			v.mu.Unlock()
+		}
+	}
+}
+
+// Write feeds streamed text into the thinking pane, splitting on '\n'
+// and redrawing after each chunk so partial lines update
+// character-by-character as tokens stream in.
 func (v *Viewport) Write(p []byte) (int, error) {
 	if !IsTerminal(v.w) {
 		return len(p), nil
@@ -237,8 +311,9 @@ func (v *Viewport) Write(p []byte) (int, error) {
 
 func (v *Viewport) pushLine(line string) {
 	v.finished = append(v.finished, line)
-	if len(v.finished) > v.height {
-		v.finished = v.finished[len(v.finished)-v.height:]
+	max := v.height - 1
+	if len(v.finished) > max {
+		v.finished = v.finished[len(v.finished)-max:]
 	}
 }
 
@@ -254,22 +329,40 @@ func (v *Viewport) termWidth() int {
 	return w
 }
 
+// spinnerFrames is the Braille rotation shared between Spinner.loop and
+// Viewport.tick.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// pickNextMsg returns a random index into msgs that differs from prev,
+// so the verb visibly changes on each rotation. Falls back to 0 for a
+// single-element pool.
+func pickNextMsg(msgs []string, prev int) int {
+	if len(msgs) <= 1 {
+		return 0
+	}
+	next := rand.IntN(len(msgs) - 1)
+	if next >= prev {
+		next++
+	}
+	return next
+}
+
+// draw renders the full viewport region. Caller must hold v.mu.
 func (v *Viewport) draw() {
 	width := v.termWidth()
 	if v.rendered {
 		fmt.Fprintf(v.w, "\033[%dF\033[J", v.height)
 	}
 
+	thinkLines := v.height - 1
 	visible := append([]string{}, v.finished...)
 	if v.current != "" {
 		visible = append(visible, v.current)
 	}
-	if len(visible) > v.height {
-		visible = visible[len(visible)-v.height:]
+	if len(visible) > thinkLines {
+		visible = visible[len(visible)-thinkLines:]
 	}
-	// Pad with blanks so the block is always exactly `height` lines —
-	// the next redraw can rewind by a fixed number of rows.
-	for len(visible) < v.height {
+	for len(visible) < thinkLines {
 		visible = append(visible, "")
 	}
 
@@ -278,23 +371,31 @@ func (v *Viewport) draw() {
 	for _, line := range visible {
 		fmt.Fprintln(v.w, Dim(v.w, prefix+truncate(line, maxLine)))
 	}
+	frame := spinnerFrames[v.frameIdx]
+	msg := v.msgs[v.msgIdx]
+	fmt.Fprintln(v.w, Dim(v.w, frame+" "+msg+"…"))
 	v.rendered = true
 }
 
-// Stop clears the viewport region. Safe to call multiple times.
+// Stop halts the spinner ticker and clears the viewport region. Safe to
+// call multiple times; only the first call has effect. Blocks until the
+// ticker goroutine has exited so a subsequent write to the same writer
+// can't interleave with a half-printed frame.
 func (v *Viewport) Stop() {
-	if !IsTerminal(v.w) {
-		return
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if !v.rendered {
-		return
-	}
-	fmt.Fprintf(v.w, "\033[%dF\033[J", v.height)
-	v.rendered = false
-	v.finished = nil
-	v.current = ""
+	v.once.Do(func() {
+		if IsTerminal(v.w) {
+			close(v.stop)
+			<-v.done
+			v.mu.Lock()
+			if v.rendered {
+				fmt.Fprintf(v.w, "\033[%dF\033[J", v.height)
+				v.rendered = false
+			}
+			v.finished = nil
+			v.current = ""
+			v.mu.Unlock()
+		}
+	})
 }
 
 // truncate shortens s to at most width runes, appending an ellipsis when
