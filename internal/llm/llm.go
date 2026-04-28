@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -26,7 +27,7 @@ import (
 //go:embed conventional-commits.md
 var conventionalCommitsSpec string
 
-const systemRules = `You write git commit message subjects from staged diffs.
+const systemRules = `You generate git commit subjects from staged diffs.
 
 You have access to tools that can read files and list directories from the
 current git repository. Use them only when the staged diff doesn't show
@@ -41,18 +42,29 @@ strictly off-limits — the tools will refuse them. Do not try to bypass
 this; there is nothing to read in those locations that matters for a
 commit subject.
 
-Rules:
-- Output exactly one line.
-- Always use Conventional Commits format: <type>[(<scope>)][!]: <description>
+Your final answer MUST be a JSON object of the form:
+  {"subject": "<the commit subject>"}
+
+Do not produce a code review, a summary, a list of changes, markdown
+formatting, multiple lines, or any prose. The "subject" string itself is
+the entire output the user cares about.
+
+The subject value must follow these rules:
+- Exactly one line.
+- Conventional Commits format: <type>[(<scope>)][!]: <description>
 - Pick the type that best fits the change. Never omit the type prefix.
 - Include a scope when the change clearly belongs to one area. Identify it
   from the staged file paths: a single Go package → its name (e.g.
   internal/git/* → fix(git):), a top-level module → that name (e.g.
-  cmd/gcg/* → fix(gcg):). Omit only when the change spans unrelated areas.
-- Mark breaking changes with ! immediately before the colon (e.g. feat(api)!: ...).
+  cmd/gcg/* → fix(gcg):), a feature folder for other stacks (e.g.
+  app/Domains/Operations/* → feat(operations):). Omit only when the change
+  spans unrelated areas.
+- For commits introducing or rolling out a system (feature flags, auth
+  layer, etc.), prefer that as the scope: feat(pennant):, feat(auth):.
+- Mark breaking changes with ! immediately before the colon.
 - Imperative mood ("add", not "added").
-- 72 characters or fewer total (the whole subject).
-- No trailing period, quotes, backticks, or preamble.
+- 72 characters or fewer total.
+- No trailing period, quotes, or backticks.
 - Describe what changed and why it matters, not how it was implemented.
 
 Conventional Commits 1.0.0 reference — consult this when picking type or scope:
@@ -60,6 +72,22 @@ Conventional Commits 1.0.0 reference — consult this when picking type or scope
 `
 
 var systemPrompt = systemRules + conventionalCommitsSpec
+
+// subjectSchema constrains the model's content output to a JSON object
+// with a single "subject" string. Ollama enforces this at the grammar
+// layer, so the model cannot emit prose, markdown, or multi-line reviews
+// even when the staged diff is overwhelming. Tool calls are unaffected
+// (they're a separate response path).
+const subjectSchema = `{
+	"type": "object",
+	"properties": {
+		"subject": {
+			"type": "string",
+			"description": "Conventional Commits subject line, one line, 72 chars or fewer"
+		}
+	},
+	"required": ["subject"]
+}`
 
 // maxToolIterations caps the chat-loop length so a misbehaving model can't
 // spin in tool calls forever.
@@ -98,45 +126,43 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		if useSpinner {
 			sp = term.NewSpinner(stream, fmt.Sprintf("consulting %s…", model))
 		}
-		spinnerStopped := false
 
 		req := &api.ChatRequest{
 			Model:    model,
 			Messages: messages,
 			Tools:    apiTools,
 			Stream:   &streamFlag,
+			Format:   json.RawMessage(subjectSchema),
 		}
 
+		// We accumulate the model's content silently rather than streaming
+		// it to the user. The content is JSON (per the Format constraint)
+		// and would just look like noisy `{"subj` token fragments. The
+		// spinner provides feedback during the wait; the extracted subject
+		// is printed as one clean line after parsing.
 		chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
-			// Stop the spinner the moment we get any signal — content or a
-			// tool call — so subsequent writes start at column 0 on a clean
-			// line instead of overlapping a half-printed frame.
-			if !spinnerStopped && sp != nil &&
-				(resp.Message.Content != "" || len(resp.Message.ToolCalls) > 0) {
-				sp.Stop()
-				spinnerStopped = true
-			}
-			if stream != nil && resp.Message.Content != "" {
-				_, _ = io.WriteString(stream, resp.Message.Content)
-			}
 			sb.WriteString(resp.Message.Content)
 			if len(resp.Message.ToolCalls) > 0 {
 				toolCalls = append(toolCalls, resp.Message.ToolCalls...)
 			}
 			return nil
 		})
-		if sp != nil && !spinnerStopped {
+		if sp != nil {
 			sp.Stop()
-		}
-		if stream != nil && sb.Len() > 0 {
-			_, _ = io.WriteString(stream, "\n")
 		}
 		if chatErr != nil {
 			return "", classifyErr(chatErr, model)
 		}
 
 		if len(toolCalls) == 0 {
-			return sb.String(), nil
+			subject, err := extractSubject(sb.String())
+			if err != nil {
+				return "", err
+			}
+			if stream != nil {
+				fmt.Fprintln(stream, subject)
+			}
+			return subject, nil
 		}
 
 		// Append the assistant turn (with its tool calls) to history.
@@ -224,6 +250,34 @@ func buildOllamaTools() (api.Tools, error) {
 	}
 	return out, nil
 }
+
+// extractSubject parses the model's structured-output response and
+// returns the subject string. The Format constraint guarantees valid JSON
+// matching subjectSchema, so the parse should always succeed; if it
+// doesn't (model misbehavior, Ollama oddity), fall back to scanning for
+// the first Conventional-Commits-shaped line in the raw output.
+func extractSubject(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("model returned empty response")
+	}
+	var parsed struct {
+		Subject string `json:"subject"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil && parsed.Subject != "" {
+		return parsed.Subject, nil
+	}
+	// Fallback: a CC-shaped first line is better than nothing.
+	for line := range strings.SplitSeq(raw, "\n") {
+		t := strings.TrimSpace(line)
+		if ccSubjectRe.MatchString(t) {
+			return t, nil
+		}
+	}
+	return "", fmt.Errorf("model output is not a usable subject (raw: %q)", raw)
+}
+
+var ccSubjectRe = regexp.MustCompile(`^[a-z]+(\([\w./-]+\))?!?:\s+\S`)
 
 func formatArgs(args map[string]any) string {
 	if len(args) == 0 {

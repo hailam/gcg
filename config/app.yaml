@@ -8,4 +8,4 @@ llm:
   model: ${GCG_MODEL|gemma4:e4b}
 
 diff:
-  max_bytes: ${GCG_DIFF_MAX_BYTES|204800}
+  max_bytes: ${GCG_DIFF_MAX_BYTES|32768}
