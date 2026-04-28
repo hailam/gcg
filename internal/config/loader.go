@@ -58,7 +58,6 @@ func Load(out any, opts ...Option) error {
 	}
 
 	if err := c.Decode(out); err != nil {
-		slog.Error("error decoding config", "error", err)
 		return fmt.Errorf("config: decode: %w", err)
 	}
 	return nil

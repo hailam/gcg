@@ -6,6 +6,7 @@ package gcg
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/atotto/clipboard"
@@ -46,14 +47,18 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 	if err != nil {
 		return fmt.Errorf("generating staged diff: %w", err)
 	}
+	slog.Debug("staged diff", "bytes", len(rawDiff))
 
 	prompt := diff.BuildPrompt(rawDiff, app.Cfg.Diff.MaxBytes)
+	slog.Debug("prompt built", "bytes", len(prompt), "max_bytes", app.Cfg.Diff.MaxBytes)
+
 	raw, err := llm.Generate(ctx, app.Cfg.LLM.Host, app.Cfg.LLM.Model, prompt, os.Stdout)
 	if err != nil {
 		return fmt.Errorf("generating commit message: %w", err)
 	}
 
 	cleaned := llm.PostProcess(raw)
+	slog.Debug("post-processed subject", "raw", raw, "cleaned", cleaned)
 	if cleaned == "" {
 		return fmt.Errorf("the model returned no usable subject")
 	}

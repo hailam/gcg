@@ -6,7 +6,6 @@ package bootstrap
 
 import (
 	"fmt"
-	"log/slog"
 
 	"github.com/hailam/gcg/internal/config"
 )
@@ -36,7 +35,6 @@ func Init(opts ...Option) (*App, error) {
 
 	var cfg config.Config
 	if err := config.Load(&cfg, o.cfgOpts...); err != nil {
-		slog.Error("error loading config", "error", err)
 		return nil, fmt.Errorf("bootstrap: %w", err)
 	}
 	return &App{Cfg: &cfg}, nil

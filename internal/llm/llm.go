@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ollama/ollama/api"
 
@@ -205,6 +207,10 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	useUI := stream != nil && term.IsTerminal(stream)
 	think := api.ThinkValue{Value: true}
 
+	slog.Debug("llm.Generate start",
+		"model", model, "host", host,
+		"prompt_bytes", len(userPrompt), "tools", len(apiTools), "ui", useUI)
+
 	// Phase 1 — tool use. Format is intentionally NOT set here because in
 	// Ollama's grammar layer it biases the sampler against tool calls
 	// (the schema doesn't include tool-call shape, so the model heads
@@ -289,9 +295,18 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 				line := fmt.Sprintf("[%s%s]", tc.Function.Name, formatArgs(args))
 				fmt.Fprintln(stream, term.Cyan(stream, line))
 			}
+			start := time.Now()
 			result, execErr := tools.Execute(ctx, tc.Function.Name, args)
+			dur := time.Since(start)
 			if execErr != nil {
+				slog.Debug("tool error",
+					"name", tc.Function.Name, "args", args,
+					"error", execErr, "duration_ms", dur.Milliseconds())
 				result = "Error: " + execErr.Error()
+			} else {
+				slog.Debug("tool call",
+					"name", tc.Function.Name, "args", args,
+					"result_bytes", len(result), "duration_ms", dur.Milliseconds())
 			}
 			messages = append(messages, api.Message{
 				Role:    "tool",
@@ -306,9 +321,11 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	// final subject.
 	if phase1Done && phase1Content != "" {
 		if subject, err := extractSubject(phase1Content); err == nil {
+			slog.Debug("phase 1 short-circuit", "subject", subject)
 			return subject, nil
 		}
 	}
+	slog.Debug("phase 1 → phase 2", "phase1_done", phase1Done, "phase1_content_bytes", len(phase1Content))
 
 	// Phase 2 — structuring. Format constraint forces a JSON object
 	// matching subjectSchema. Tools are NOT declared here because the
@@ -354,6 +371,7 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	if chatErr != nil {
 		return "", classifyErr(chatErr, model)
 	}
+	slog.Debug("phase 2 done", "response_bytes", sb.Len())
 
 	subject, err := extractSubject(sb.String())
 	if err != nil {
@@ -434,7 +452,8 @@ func extractSubject(raw string) (string, error) {
 		return "", fmt.Errorf("model returned empty response")
 	}
 
-	for _, candidate := range []string{raw, stripCodeFence(raw), extractJSONObject(raw)} {
+	strategies := []string{"raw", "fence-stripped", "object-extracted"}
+	for i, candidate := range []string{raw, stripCodeFence(raw), extractJSONObject(raw)} {
 		if candidate == "" {
 			continue
 		}
@@ -445,6 +464,7 @@ func extractSubject(raw string) (string, error) {
 		if !validCCType[parts.Type] {
 			return "", fmt.Errorf("model produced invalid type %q (raw: %q)", parts.Type, raw)
 		}
+		slog.Debug("extractSubject parsed", "strategy", strategies[i])
 		return parts.Subject(), nil
 	}
 
@@ -452,6 +472,7 @@ func extractSubject(raw string) (string, error) {
 	for line := range strings.SplitSeq(raw, "\n") {
 		t := strings.TrimSpace(line)
 		if ccSubjectRe.MatchString(t) {
+			slog.Debug("extractSubject parsed", "strategy", "regex-fallback")
 			return t, nil
 		}
 	}
@@ -513,6 +534,7 @@ func classifyErr(err error, model string) error {
 	}
 	var statusErr *api.StatusError
 	if errors.As(err, &statusErr) && statusErr.StatusCode == 404 {
+		slog.Debug("classifyErr", "branch", "status_404", "model", model, "original", err.Error())
 		return fmt.Errorf("model %q is not available locally — run: ollama pull %s", model, model)
 	}
 	msg := strings.ToLower(err.Error())
@@ -521,10 +543,13 @@ func classifyErr(err error, model string) error {
 		strings.Contains(msg, "no such host"),
 		strings.Contains(msg, "could not connect"),
 		strings.Contains(msg, "dial tcp"):
+		slog.Debug("classifyErr", "branch", "connection", "original", err.Error())
 		return fmt.Errorf("ollama is not reachable — start it with: ollama serve")
 	case strings.Contains(msg, "model") && strings.Contains(msg, "not found"):
+		slog.Debug("classifyErr", "branch", "model_not_found", "model", model, "original", err.Error())
 		return fmt.Errorf("model %q is not available locally — run: ollama pull %s", model, model)
 	}
+	slog.Debug("classifyErr", "branch", "passthrough", "original", err.Error())
 	return err
 }
 
