@@ -178,7 +178,10 @@ func NewSpinner(w io.Writer, msg string) *Spinner {
 }
 
 // NewSpinnerPool starts a spinner that cycles through msgs roughly every
-// 1.5s. msgs must be non-empty; the first entry shows immediately.
+// 1.5s. msgs must be non-empty; the first entry shows immediately. On a
+// non-terminal writer the goroutine is not started and Stop is a no-op,
+// matching the package's documented contract that spinner output is
+// silently suppressed for piped output.
 func NewSpinnerPool(w io.Writer, msgs []string) *Spinner {
 	if len(msgs) == 0 {
 		msgs = []string{"working"}
@@ -189,7 +192,11 @@ func NewSpinnerPool(w io.Writer, msgs []string) *Spinner {
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	go s.loop()
+	if IsTerminal(w) {
+		go s.loop()
+	} else {
+		close(s.done)
+	}
 	return s
 }
 
@@ -229,11 +236,14 @@ func (s *Spinner) loop() {
 // Stop halts the spinner and clears its line. Safe to call multiple
 // times; only the first call has effect. Blocks until the spinner
 // goroutine has actually exited so a subsequent write to the same
-// writer can't interleave with a half-printed frame.
+// writer can't interleave with a half-printed frame. No-op when the
+// writer is not a terminal (the goroutine was never started).
 func (s *Spinner) Stop() {
 	s.once.Do(func() {
-		close(s.stop)
-		<-s.done
+		if IsTerminal(s.w) {
+			close(s.stop)
+			<-s.done
+		}
 	})
 }
 

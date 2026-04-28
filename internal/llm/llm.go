@@ -487,7 +487,13 @@ func extractJSONObject(s string) string {
 	return s[start : end+1]
 }
 
-var ccSubjectRe = regexp.MustCompile(`^[a-z]+(\([\w./-]+\))?!?:\s+\S`)
+// ccSubjectRe matches a Conventional-Commits-shaped line. The type
+// alternation mirrors validCCType / subjectSchema so the fallback can't
+// accept prose like "thinking: ..." or "looking: ..." that happens to
+// share the lowercase-prefix-colon shape.
+var ccSubjectRe = regexp.MustCompile(
+	`^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([\w./-]+\))?!?:\s+\S`,
+)
 
 func formatArgs(args map[string]any) string {
 	if len(args) == 0 {

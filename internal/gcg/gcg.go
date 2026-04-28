@@ -29,8 +29,7 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 
 	hasGitStagedChanges, err := git.HasStagedChanges()
 	if err != nil {
-		fmt.Println("error checking staged changes:", err)
-		return err
+		return fmt.Errorf("checking staged changes: %w", err)
 	}
 
 	if !hasGitStagedChanges {
@@ -40,26 +39,22 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 
 	app, err := load()
 	if err != nil {
-		fmt.Println("error loading config:", err)
-		return err
+		return fmt.Errorf("loading config: %w", err)
 	}
 
 	rawDiff, err := git.StagedDiff()
 	if err != nil {
-		fmt.Println("error generating staged diff:", err)
-		return err
+		return fmt.Errorf("generating staged diff: %w", err)
 	}
 
 	prompt := diff.BuildPrompt(rawDiff, app.Cfg.Diff.MaxBytes)
 	raw, err := llm.Generate(ctx, app.Cfg.LLM.Host, app.Cfg.LLM.Model, prompt, os.Stdout)
 	if err != nil {
-		fmt.Println("error generating commit message:", err)
-		return err
+		return fmt.Errorf("generating commit message: %w", err)
 	}
 
 	cleaned := llm.PostProcess(raw)
 	if cleaned == "" {
-		fmt.Println("the model returned no usable subject")
 		return fmt.Errorf("the model returned no usable subject")
 	}
 
