@@ -1,5 +1,5 @@
 // Package bootstrap performs the shared startup work that every entry point
-// (cmd/cli, future cmd/server, etc.) needs: load .env, load YAML config,
+// (cmd/gcg, future cmd/server, etc.) needs: load YAML config,
 // decode into a Config. Entry points call Init and then build whatever
 // service-specific clients they need on top of the returned App.
 package bootstrap

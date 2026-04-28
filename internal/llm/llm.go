@@ -48,7 +48,7 @@ Rules:
 - Include a scope when the change clearly belongs to one area. Identify it
   from the staged file paths: a single Go package → its name (e.g.
   internal/git/* → fix(git):), a top-level module → that name (e.g.
-  cmd/cli/* → fix(cli):). Omit only when the change spans unrelated areas.
+  cmd/gcg/* → fix(gcg):). Omit only when the change spans unrelated areas.
 - Mark breaking changes with ! immediately before the colon (e.g. feat(api)!: ...).
 - Imperative mood ("add", not "added").
 - 72 characters or fewer total (the whole subject).
