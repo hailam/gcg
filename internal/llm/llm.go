@@ -201,13 +201,20 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		{Role: "user", Content: userPrompt},
 	}
 
-	useSpinner := stream != nil && term.IsTerminal(stream)
+	useUI := stream != nil && term.IsTerminal(stream)
+	think := api.ThinkValue{Value: true}
 
 	// Phase 1 — tool use. Format is intentionally NOT set here because in
 	// Ollama's grammar layer it biases the sampler against tool calls
 	// (the schema doesn't include tool-call shape, so the model heads
 	// straight for the schema-matching answer). Letting the model be free
 	// here gives tools a fair chance to fire.
+	//
+	// Streaming is enabled on a TTY so we can render thinking chunks
+	// live in a viewport. Reasoning models like gemma4:e4b deliver
+	// tool_calls cleanly in their terminal chunk; the callback below
+	// accumulates ToolCalls across all chunks so a streamed terminal
+	// chunk works the same as a single non-streamed response.
 	var phase1Content string
 	phase1Done := false
 	for range maxToolIterations {
@@ -215,31 +222,44 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		var toolCalls []api.ToolCall
 
 		var sp *term.Spinner
-		if useSpinner {
-			sp = term.NewSpinner(stream, fmt.Sprintf("consulting %s…", model))
+		var vp *term.Viewport
+		if useUI {
+			sp = term.NewSpinnerPool(stream, term.MsgsThinking)
 		}
 
-		// Phase 1 disables streaming. Ollama's streaming chat with tools
-		// is unreliable for some models (gemma family in particular):
-		// tool_calls only appear in the terminal chunk and our streamed
-		// callback path can lose them. Non-streaming gives us a single
-		// response with tool_calls intact.
-		phase1Stream := false
+		phase1Stream := useUI
 		req := &api.ChatRequest{
 			Model:    model,
 			Messages: messages,
 			Tools:    apiTools,
 			Stream:   &phase1Stream,
+			Think:    &think,
 		}
 		chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
 			sb.WriteString(resp.Message.Content)
 			if len(resp.Message.ToolCalls) > 0 {
 				toolCalls = append(toolCalls, resp.Message.ToolCalls...)
 			}
+			if useUI && resp.Message.Thinking != "" {
+				// First thinking chunk: hand off the line from the
+				// spinner to the viewport so they don't fight over the
+				// same writer.
+				if sp != nil {
+					sp.Stop()
+					sp = nil
+				}
+				if vp == nil {
+					vp = term.NewViewport(stream, 4)
+				}
+				_, _ = vp.Write([]byte(resp.Message.Thinking))
+			}
 			return nil
 		})
 		if sp != nil {
 			sp.Stop()
+		}
+		if vp != nil {
+			vp.Stop()
 		}
 		if chatErr != nil {
 			return "", classifyErr(chatErr, model)
@@ -300,8 +320,9 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	})
 
 	var sp *term.Spinner
-	if useSpinner {
-		sp = term.NewSpinner(stream, "structuring response…")
+	var vp *term.Viewport
+	if useUI {
+		sp = term.NewSpinnerPool(stream, term.MsgsStructuring)
 	}
 	var sb strings.Builder
 	req := &api.ChatRequest{
@@ -309,13 +330,27 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		Messages: messages,
 		Stream:   &streamFlag,
 		Format:   json.RawMessage(subjectSchema),
+		Think:    &think,
 	}
 	chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
 		sb.WriteString(resp.Message.Content)
+		if useUI && resp.Message.Thinking != "" {
+			if sp != nil {
+				sp.Stop()
+				sp = nil
+			}
+			if vp == nil {
+				vp = term.NewViewport(stream, 4)
+			}
+			_, _ = vp.Write([]byte(resp.Message.Thinking))
+		}
 		return nil
 	})
 	if sp != nil {
 		sp.Stop()
+	}
+	if vp != nil {
+		vp.Stop()
 	}
 	if chatErr != nil {
 		return "", classifyErr(chatErr, model)

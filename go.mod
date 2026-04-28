@@ -7,6 +7,7 @@ require (
 	github.com/gookit/config/v2 v2.2.7
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/ollama/ollama v0.21.2
+	golang.org/x/term v0.36.0
 )
 
 require (
@@ -30,7 +31,6 @@ require (
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
