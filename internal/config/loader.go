@@ -31,7 +31,7 @@ func Load(out any, opts ...Option) error {
 	}
 
 	if o.configPath == "" {
-		slog.Info("no config file specified; using default", "path", "config/app.yaml")
+		slog.Debug("no config file specified; using default", "path", "config/app.yaml")
 		wd, _ := os.Getwd()
 		o.configPath = filepath.Join(wd, "config", "app.yaml")
 	}

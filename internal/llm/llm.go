@@ -19,6 +19,7 @@ import (
 
 	"github.com/ollama/ollama/api"
 
+	"github.com/hailam/play-commit/internal/term"
 	"github.com/hailam/play-commit/internal/tools"
 )
 
@@ -87,9 +88,17 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		{Role: "user", Content: userPrompt},
 	}
 
+	useSpinner := stream != nil && term.IsTerminal(stream)
+
 	for range maxToolIterations {
 		var sb strings.Builder
 		var toolCalls []api.ToolCall
+
+		var sp *term.Spinner
+		if useSpinner {
+			sp = term.NewSpinner(stream, fmt.Sprintf("consulting %s…", model))
+		}
+		spinnerStopped := false
 
 		req := &api.ChatRequest{
 			Model:    model,
@@ -99,6 +108,14 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		}
 
 		chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
+			// Stop the spinner the moment we get any signal — content or a
+			// tool call — so subsequent writes start at column 0 on a clean
+			// line instead of overlapping a half-printed frame.
+			if !spinnerStopped && sp != nil &&
+				(resp.Message.Content != "" || len(resp.Message.ToolCalls) > 0) {
+				sp.Stop()
+				spinnerStopped = true
+			}
 			if stream != nil && resp.Message.Content != "" {
 				_, _ = io.WriteString(stream, resp.Message.Content)
 			}
@@ -108,6 +125,9 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 			}
 			return nil
 		})
+		if sp != nil && !spinnerStopped {
+			sp.Stop()
+		}
 		if stream != nil && sb.Len() > 0 {
 			_, _ = io.WriteString(stream, "\n")
 		}
@@ -130,7 +150,8 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		for _, tc := range toolCalls {
 			args := tc.Function.Arguments.ToMap()
 			if stream != nil {
-				fmt.Fprintf(stream, "[%s%s]\n", tc.Function.Name, formatArgs(args))
+				line := fmt.Sprintf("[%s%s]", tc.Function.Name, formatArgs(args))
+				fmt.Fprintln(stream, term.Cyan(stream, line))
 			}
 			result, execErr := tools.Execute(ctx, tc.Function.Name, args)
 			if execErr != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/hailam/play-commit/internal/diff"
 	"github.com/hailam/play-commit/internal/git"
 	"github.com/hailam/play-commit/internal/llm"
+	"github.com/hailam/play-commit/internal/term"
 )
 
 // Run executes the gcg flow. The load callback is only invoked when there
@@ -65,5 +66,6 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 	if err := clipboard.WriteAll(cleaned); err != nil {
 		return fmt.Errorf("clipboard: %w", err)
 	}
+	fmt.Fprintln(os.Stdout, term.Green(os.Stdout, "✓ copied to clipboard: "+cleaned))
 	return nil
 }
