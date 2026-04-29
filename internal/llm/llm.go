@@ -31,17 +31,46 @@ var conventionalCommitsSpec string
 
 const systemRules = `You generate git commit subjects from staged diffs.
 
-You have access to tools that can read files and list directories from the
-current git repository. Prefer using them whenever the diff alone leaves
-you uncertain about ANY of these:
-  * What an exported symbol referenced by the diff actually does (its full
-    signature, callers, or whether it is part of a public API).
-  * The right scope when a path is in an unfamiliar layout — list_dir the
-    parent to see what siblings exist.
-  * Whether a removed/renamed identifier is genuinely public-facing
-    (read callers, route files, or migration history).
-An extra tool call is cheaper than a wrong commit subject — when in doubt,
-read.
+What the user message contains:
+  * "Files changed:" — every staged path with its kind (regular,
+    lockfile, generated). Generated bodies are intentionally omitted.
+  * "Repository layout near changes:" — the siblings of every parent
+    directory of a changed file. This is canonical scope information;
+    do NOT call list_dir on a path already enumerated here.
+  * Diff bodies — unified diffs with 20 lines of context per hunk, so
+    most hunks already include the surrounding function signature,
+    imports, and sibling cases. Lockfile bodies are capped and labeled
+    low-priority.
+
+You also have read_file and list_dir tools that can reach anywhere in the
+repository (subject to the gitignore boundary below). Default to using
+them when the answer depends on something not already shown above. Do
+not stop at the diff surface — exported symbols routinely have callers
+the diff doesn't show, and a wrong scope or a missed breaking-change
+flag is worse than an extra tool call.
+
+You MUST call read_file BEFORE producing your final answer when any of
+these apply:
+  * The diff removes or renames an exported symbol (capitalized
+    identifier in Go; "export"/"export default" in JS/TS; public method
+    in PHP/Java). Read at least one sibling file in the same directory
+    (use the layout section to pick one) to check whether callers
+    survive that aren't part of the staged change. This decides
+    breaking=true/false.
+  * The diff changes the signature of an exported function/method —
+    parameters, return type, receiver, or visibility. Read enough of
+    the file (use start_line around the hunk) to confirm the full
+    declaration and whether it crosses a package/API boundary.
+  * The staged paths span an unfamiliar layout that the layout section
+    does not clarify (e.g. a deep feature folder you haven't seen) —
+    read a sibling file's package/namespace declaration to learn the
+    convention before guessing the scope.
+
+Skip extra tool calls only when the diff plus the included context
+already answer the type/scope/breaking question unambiguously — for
+example, a docs-only change, a comment-only change, a self-contained
+internal refactor whose only public surface is already visible in the
+20-line context, or a config/ci-only change.
 
 The tools only expose files that are part of this repository AND not
 matched by .gitignore. Files inside .git/ and ignored paths (build

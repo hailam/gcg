@@ -57,7 +57,7 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 	}
 	slog.Debug("staged diff", "bytes", len(rawDiff))
 
-	prompt := diff.BuildPrompt(rawDiff, app.Cfg.Diff.MaxBytes)
+	prompt := diff.BuildPrompt(ctx, rawDiff, app.Cfg.Diff.MaxBytes)
 	slog.Debug("prompt built", "bytes", len(prompt), "max_bytes", app.Cfg.Diff.MaxBytes)
 
 	raw, err := llm.Generate(ctx, app.Cfg.LLM.Host, app.Cfg.LLM.Model, prompt, os.Stdout)

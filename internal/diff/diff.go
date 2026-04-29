@@ -1,15 +1,21 @@
 // Package diff turns a `git diff --cached` blob into the user message sent
-// to the LLM: a `Files changed:` header listing every staged path, followed
-// by source-code diff bodies, followed by lockfile diff bodies (capped and
-// marked low-priority). Generated artifacts are listed but their bodies
-// are dropped — they carry no useful signal for a commit subject.
+// to the LLM: a `Files changed:` header listing every staged path, a
+// `Repository layout near changes:` section enumerating the siblings of
+// each parent directory (so the model has scope context up-front), then
+// source-code diff bodies, then lockfile diff bodies (capped and marked
+// low-priority). Generated artifacts are listed but their bodies are
+// dropped — they carry no useful signal for a commit subject.
 package diff
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/hailam/gcg/internal/tools"
 )
 
 // maxLockfileBytes caps each individual lockfile diff body. Lockfile diffs
@@ -18,9 +24,16 @@ import (
 // prefers the source changes for picking the commit type.
 const maxLockfileBytes = 4 * 1024
 
+// maxLayoutBytes caps the total size of the auto-injected "Repository
+// layout near changes" section. The layout is a helper, not the main
+// signal — if it grew unbounded across many parent dirs it could push
+// real diff content out of the prompt window.
+const maxLayoutBytes = 4 * 1024
+
 // BuildPrompt produces the user message described in the package doc.
-// maxBytes <= 0 disables the overall truncation.
-func BuildPrompt(rawDiff string, maxBytes int) string {
+// maxBytes <= 0 disables the overall truncation. ctx scopes the in-process
+// list_dir invocations used to attach the repository-layout section.
+func BuildPrompt(ctx context.Context, rawDiff string, maxBytes int) string {
 	sections := splitByFile(rawDiff)
 
 	var listing strings.Builder
@@ -51,6 +64,8 @@ func BuildPrompt(rawDiff string, maxBytes int) string {
 		}
 	}
 
+	layout := buildLayout(ctx, sections)
+
 	var bodies strings.Builder
 	for _, b := range sourceBodies {
 		bodies.WriteString(b)
@@ -62,11 +77,73 @@ func BuildPrompt(rawDiff string, maxBytes int) string {
 		}
 	}
 
-	full := listing.String() + "\n" + bodies.String()
+	full := listing.String() + layout + "\n" + bodies.String()
 	if maxBytes > 0 && len(full) > maxBytes {
 		full = full[:maxBytes] + "\n...[truncated]\n"
 	}
 	return full
+}
+
+// buildLayout returns a "Repository layout near changes" block listing the
+// siblings of each unique parent directory of a changed file. The model
+// reads scope (package/feature folder boundaries) from this rather than
+// having to call list_dir itself in the common case. Failures from
+// list_dir are silent — the diff alone is still a usable prompt.
+//
+// Output is capped at maxLayoutBytes overall so a deeply-nested change
+// touching many directories can't crowd out the diff bodies.
+func buildLayout(ctx context.Context, sections []section) string {
+	if len(sections) == 0 {
+		return ""
+	}
+
+	seen := map[string]bool{}
+	var dirs []string
+	for _, s := range sections {
+		if s.path == "" {
+			continue
+		}
+		dir := filepath.Dir(s.path)
+		if dir == "" {
+			dir = "."
+		}
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+
+	var sb strings.Builder
+	sb.WriteString("\nRepository layout near changes (canonical — do NOT call list_dir on these paths):\n")
+	header := sb.Len()
+
+	for _, dir := range dirs {
+		out, err := tools.Execute(ctx, "list_dir", map[string]any{"path": dir})
+		if err != nil || strings.TrimSpace(out) == "" {
+			continue
+		}
+		var dirBlock strings.Builder
+		fmt.Fprintf(&dirBlock, "  %s/\n", dir)
+		for line := range strings.SplitSeq(out, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			fmt.Fprintf(&dirBlock, "    %s\n", line)
+		}
+		if sb.Len()+dirBlock.Len() > maxLayoutBytes {
+			sb.WriteString("  ...[layout truncated; remaining parent dirs omitted]\n")
+			break
+		}
+		sb.WriteString(dirBlock.String())
+	}
+
+	if sb.Len() == header {
+		return ""
+	}
+	return sb.String()
 }
 
 type section struct {

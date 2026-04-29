@@ -35,9 +35,15 @@ func HasStagedChanges() (bool, error) {
 	return false, fmt.Errorf("git diff --cached --quiet: %w", err)
 }
 
-// StagedDiff returns the output of `git diff --cached`.
+// StagedDiff returns the output of `git diff --cached -U20`. The wider
+// unified-context window (default is 3 lines) makes the diff a much
+// stronger standalone signal: tiny files come through nearly whole, and
+// hunks land surrounded by enough code (function signatures, imports,
+// sibling cases) to anchor the model's interpretation without forcing a
+// follow-up read_file. The prompt builder still applies an overall byte
+// cap, so pathological diffs can't blow out the context window.
 func StagedDiff() (string, error) {
-	out, err := exec.Command("git", "diff", "--cached").Output()
+	out, err := exec.Command("git", "diff", "--cached", "-U20").Output()
 	if err != nil {
 		return "", fmt.Errorf("git diff --cached: %w", err)
 	}
