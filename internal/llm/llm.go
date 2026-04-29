@@ -180,6 +180,35 @@ var validCCType = map[string]bool{
 // spin in tool calls forever.
 const maxToolIterations = 5
 
+// Preflight verifies Ollama is reachable at host and that model is present
+// in its local catalog before any prompt building or streaming UI work
+// happens. One round-trip via /api/tags covers both failure modes — server
+// down (or wrong OLLAMA_HOST) and model not pulled — so the user gets a
+// precise remediation message instead of a generic chat-call failure.
+func Preflight(ctx context.Context, host, model string) error {
+	u, err := url.Parse(host)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("invalid llm.host %q — set OLLAMA_HOST to a URL like http://localhost:11434", host)
+	}
+	client := api.NewClient(u, http.DefaultClient)
+
+	slog.Debug("preflight start", "host", host, "model", model)
+	resp, err := client.List(ctx)
+	if err != nil {
+		slog.Debug("preflight failed", "host", host, "error", err)
+		return fmt.Errorf("ollama is not reachable at %s — start it with `ollama serve`, or set OLLAMA_HOST to point at a running instance (original: %w)", host, err)
+	}
+
+	for _, m := range resp.Models {
+		if m.Name == model || m.Model == model {
+			slog.Debug("preflight ok", "host", host, "model", model, "catalog_size", len(resp.Models))
+			return nil
+		}
+	}
+	slog.Debug("preflight model missing", "host", host, "model", model, "catalog_size", len(resp.Models))
+	return fmt.Errorf("ollama is reachable at %s but model %q is not available locally — run: ollama pull %s", host, model, model)
+}
+
 // Generate sends userPrompt to the Ollama instance at host using model and
 // drives a chat loop that handles any tool calls in-process. When stream
 // is a TTY, live thinking content is rendered into a rolling viewport

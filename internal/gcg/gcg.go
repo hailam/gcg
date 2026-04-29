@@ -43,6 +43,14 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	// Preflight Ollama once we know we have real work to do but before
+	// spending time on diff/prompt/UI — Ollama is a hard requirement, so
+	// a misconfigured host or unpulled model should surface here with a
+	// precise remediation hint, not as a generic mid-stream failure.
+	if err := llm.Preflight(ctx, app.Cfg.LLM.Host, app.Cfg.LLM.Model); err != nil {
+		return err
+	}
+
 	rawDiff, err := git.StagedDiff()
 	if err != nil {
 		return fmt.Errorf("generating staged diff: %w", err)
