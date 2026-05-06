@@ -178,12 +178,15 @@ func NewSpinner(w io.Writer, msg string) *Spinner {
 }
 
 // NewSpinnerPool starts a spinner that cycles through msgs roughly every
-// 1.5s. msgs must be non-empty; the first entry shows immediately. On a
+// 1.5s. Pass nil for msgs to render only the spinner glyph with no
+// trailing label (bare mode); the first entry of a non-empty pool shows
+// immediately. An explicitly empty (non-nil) slice falls back to a
+// generic "working" label as a safety net for buggy callers. On a
 // non-terminal writer the goroutine is not started and Stop is a no-op,
 // matching the package's documented contract that spinner output is
 // silently suppressed for piped output.
 func NewSpinnerPool(w io.Writer, msgs []string) *Spinner {
-	if len(msgs) == 0 {
+	if msgs != nil && len(msgs) == 0 {
 		msgs = []string{"working"}
 	}
 	s := &Spinner{
@@ -210,12 +213,26 @@ func (s *Spinner) loop() {
 	const ticksPerMessage = 18
 
 	render := func(frame, msg string) {
+		if msg == "" {
+			fmt.Fprintf(s.w, "\r\033[K%s", Dim(s.w, frame))
+			return
+		}
 		fmt.Fprintf(s.w, "\r\033[K%s", Dim(s.w, frame+" "+msg+"…"))
 	}
 
+	currentMsg := func(idx int) string {
+		if len(s.msgs) == 0 {
+			return ""
+		}
+		return s.msgs[idx]
+	}
+
 	frameIdx, tickCount := 0, 0
-	msgIdx := rand.IntN(len(s.msgs))
-	render(spinnerFrames[frameIdx], s.msgs[msgIdx])
+	msgIdx := 0
+	if len(s.msgs) > 0 {
+		msgIdx = rand.IntN(len(s.msgs))
+	}
+	render(spinnerFrames[frameIdx], currentMsg(msgIdx))
 	for {
 		select {
 		case <-s.stop:
@@ -228,7 +245,7 @@ func (s *Spinner) loop() {
 				tickCount = 0
 				msgIdx = pickNextMsg(s.msgs, msgIdx)
 			}
-			render(spinnerFrames[frameIdx], s.msgs[msgIdx])
+			render(spinnerFrames[frameIdx], currentMsg(msgIdx))
 		}
 	}
 }
@@ -279,13 +296,15 @@ type Viewport struct {
 
 // NewViewport creates a height-line viewport on w with msgs cycling in
 // the bottom spinner row. height < 2 is bumped to 4 (room for at least
-// one thinking line plus the spinner). Empty msgs falls back to a
-// generic "working".
+// one thinking line plus the spinner). Pass nil for msgs to render only
+// the spinner glyph in the bottom row with no trailing label (bare
+// mode); an explicitly empty (non-nil) slice falls back to a generic
+// "working" label.
 func NewViewport(w io.Writer, height int, msgs []string) *Viewport {
 	if height < 2 {
 		height = 4
 	}
-	if len(msgs) == 0 {
+	if msgs != nil && len(msgs) == 0 {
 		msgs = []string{"working"}
 	}
 	v := &Viewport{
@@ -310,7 +329,9 @@ func (v *Viewport) tick() {
 	const ticksPerMessage = 18
 
 	v.mu.Lock()
-	v.msgIdx = rand.IntN(len(v.msgs))
+	if len(v.msgs) > 0 {
+		v.msgIdx = rand.IntN(len(v.msgs))
+	}
 	v.draw()
 	v.mu.Unlock()
 
@@ -419,8 +440,12 @@ func (v *Viewport) draw() {
 		fmt.Fprintln(v.w, Dim(v.w, prefix+truncate(line, maxLine)))
 	}
 	frame := spinnerFrames[v.frameIdx]
-	msg := v.msgs[v.msgIdx]
-	fmt.Fprintln(v.w, Dim(v.w, frame+" "+msg+"…"))
+	if len(v.msgs) == 0 {
+		fmt.Fprintln(v.w, Dim(v.w, frame))
+	} else {
+		msg := v.msgs[v.msgIdx]
+		fmt.Fprintln(v.w, Dim(v.w, frame+" "+msg+"…"))
+	}
 	v.rendered = true
 }
 

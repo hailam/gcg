@@ -289,7 +289,7 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		var sp *term.Spinner
 		var vp *term.Viewport
 		if useUI {
-			sp = term.NewSpinnerPool(stream, term.MsgsThinking)
+			sp = term.NewSpinnerPool(stream, nil)
 		}
 
 		phase1Stream := useUI
@@ -314,7 +314,7 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 					sp = nil
 				}
 				if vp == nil {
-					vp = term.NewViewport(stream, 4, term.MsgsThinking)
+					vp = term.NewViewport(stream, 4, nil)
 				}
 				_, _ = vp.Write([]byte(resp.Message.Thinking))
 			}
