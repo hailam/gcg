@@ -31,9 +31,10 @@ function gcg-auto --description "Auto-stage every change, generate a Conventiona
         return 1
     end
 
-    # `-e` opens $EDITOR with the message pre-filled. `-F -` reads the
-    # full message (multi-line body and all) from stdin, which `-m`
-    # can't safely round-trip through a fish variable. Save+close to
-    # commit; close empty to abort. The last-mile review is yours.
-    printf '%s\n' $msg | git commit -e -F -
+    # auto means auto — commit straight through with no editor stop.
+    # `-F -` reads the full message (multi-line body and all) from
+    # stdin, which `-m` can't safely round-trip through a fish
+    # variable. If you want a last-mile review, use `gcg` directly and
+    # paste from the clipboard.
+    printf '%s\n' $msg | git commit -F -
 end
