@@ -1,6 +1,9 @@
 // Package gcg orchestrates the gcg flow: detect a usable git work tree and
-// staging area, ask the LLM for a commit subject for the staged diff,
-// stream the answer to stdout, copy the cleaned result to the clipboard.
+// staging area, ask the LLM for a commit subject (and optional body) for
+// the staged diff, stream the loading/thinking UI to stderr, and emit
+// the clean commit message to stdout (so a wrapper can capture it with
+// `set msg (gcg ...)`). The cleaned subject is also copied to the
+// clipboard unless --no-clip is set.
 package gcg
 
 import (
@@ -18,13 +21,37 @@ import (
 	"github.com/hailam/gcg/internal/term"
 )
 
+// Options configures one invocation of Run. All fields are independent;
+// the zero value matches the historical interactive behavior (clipboard
+// on, subject only, default thinking).
+type Options struct {
+	// NoClip disables the system-clipboard write. Useful when a wrapper
+	// is going to consume the commit message from stdout directly.
+	NoClip bool
+
+	// Body asks the LLM to emit a bullet-point body in addition to the
+	// subject line. The body is appended to stdout (subject \n\n body)
+	// and, when the clipboard is enabled, the clipboard payload too.
+	Body bool
+
+	// Think overrides the Ollama thinking level: "", "true", "false",
+	// "high", "medium", "low". Empty defaults to true; --body promotes
+	// the default to "high" automatically.
+	Think string
+}
+
 // Run executes the gcg flow. The load callback is only invoked when there
 // is actual work to do, so the no-op cases (outside a git tree, nothing
 // staged) never read config. Returns nil for those cases after writing a
 // one-line note to stdout.
-func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
+//
+// stderr gets the streaming UI (spinner, thinking viewport, tool calls,
+// pretty preview, "copied" confirmation). stdout gets ONLY the final
+// commit message — subject, then a blank line and the body if --body was
+// set — so a wrapper can capture it with `set msg (gcg ...)`.
+func Run(ctx context.Context, load func() (*bootstrap.App, error), opts Options) error {
 	if !git.InWorkTree() {
-		fmt.Println("not inside a git work tree — nothing to do")
+		fmt.Fprintln(os.Stderr, "not inside a git work tree — nothing to do")
 		return nil
 	}
 
@@ -34,7 +61,7 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 	}
 
 	if !hasGitStagedChanges {
-		fmt.Println("nothing staged — run `git add` first")
+		fmt.Fprintln(os.Stderr, "nothing staged — run `git add` first")
 		return nil
 	}
 
@@ -60,23 +87,44 @@ func Run(ctx context.Context, load func() (*bootstrap.App, error)) error {
 	prompt := diff.BuildPrompt(ctx, rawDiff, app.Cfg.Diff.MaxBytes)
 	slog.Debug("prompt built", "bytes", len(prompt), "max_bytes", app.Cfg.Diff.MaxBytes)
 
-	raw, err := llm.Generate(ctx, app.Cfg.LLM.Host, app.Cfg.LLM.Model, prompt, os.Stdout)
+	res, err := llm.Generate(ctx, app.Cfg.LLM.Host, app.Cfg.LLM.Model, prompt, os.Stderr, llm.Options{
+		Body:  opts.Body,
+		Think: opts.Think,
+	})
 	if err != nil {
 		return fmt.Errorf("generating commit message: %w", err)
 	}
 
-	cleaned := llm.PostProcess(raw)
-	slog.Debug("post-processed subject", "raw", raw, "cleaned", cleaned)
-	if cleaned == "" {
+	subject := llm.PostProcess(res.Subject)
+	slog.Debug("post-processed subject", "raw", res.Subject, "cleaned", subject)
+	if subject == "" {
 		return fmt.Errorf("the model returned no usable subject")
 	}
 
-	if err := clipboard.WriteAll(cleaned); err != nil {
-		return fmt.Errorf("clipboard: %w", err)
+	// commitMsg is what a wrapper would feed back into `git commit -F -`:
+	// subject, then (when --body is on) a blank line and the bullet body.
+	commitMsg := subject
+	if res.Body != "" {
+		commitMsg = subject + "\n\n" + res.Body
 	}
-	// Two-row final: the subject is the deliverable (bright, eye-
-	// catching); the clipboard confirmation is the side-effect (dim).
-	fmt.Fprintln(os.Stdout, term.BoldCyan(os.Stdout, cleaned))
-	fmt.Fprintln(os.Stdout, term.DimGreen(os.Stdout, "✓ copied to clipboard"))
+
+	if !opts.NoClip {
+		if err := clipboard.WriteAll(commitMsg); err != nil {
+			return fmt.Errorf("clipboard: %w", err)
+		}
+	}
+
+	// stderr gets the pretty two-row preview (the subject in bright
+	// bold-cyan, the side-effect confirmation in dim green). stdout gets
+	// the plain message so a wrapper can capture it cleanly.
+	fmt.Fprintln(os.Stderr, term.BoldCyan(os.Stderr, subject))
+	if res.Body != "" {
+		fmt.Fprintln(os.Stderr, term.Dim(os.Stderr, res.Body))
+	}
+	if !opts.NoClip {
+		fmt.Fprintln(os.Stderr, term.DimGreen(os.Stderr, "✓ copied to clipboard"))
+	}
+
+	fmt.Fprintln(os.Stdout, commitMsg)
 	return nil
 }

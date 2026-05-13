@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ollama/ollama/api"
 
@@ -116,16 +118,20 @@ Field rules:
   NOT breaking: adding new exported symbols, internal-only refactors,
   changes to tests, docs, build/CI, vendored deps. When in doubt and the
   diff only adds or modifies internal code, set breaking=false.
-- description: imperative ("add", not "added"). Keep it short — the
-  whole assembled subject should fit in 72 characters. Describe what
-  changed and why it matters, not how. No trailing period.
-  CRITICAL: the description is JUST the summary. Do NOT include the
-  type or scope prefix in it. gcg prepends "<type>[(<scope>)]: "
-  itself when assembling the final subject, so writing
-  "refactor: implement X" or "feat(api): add Y" inside the
-  description value will produce a duplicated prefix in the output.
-  Correct: description="implement two-phase tool-calling flow".
-  Wrong:   description="refactor: implement two-phase tool-calling flow".
+- description: imperative ("add", not "added"). Start with a
+  lowercase letter ("add user endpoint", not "Add user endpoint").
+  Keep it short — the whole assembled subject should fit in 72
+  characters. Describe what changed and why it matters, not how.
+  Stay grounded in the actual staged paths and diff bodies — do not
+  invent feature names, modules, or scopes that are not present in
+  the change. No trailing period. CRITICAL: the description is JUST
+  the summary. Do NOT include the type or scope prefix in it. gcg
+  prepends "<type>[(<scope>)]: " itself when assembling the final
+  subject, so writing "refactor: implement X" or "feat(api): add Y"
+  inside the description value will produce a duplicated prefix in
+  the output. Correct: description="implement two-phase tool-calling
+  flow". Wrong: description="refactor: implement two-phase
+  tool-calling flow".
 
 Conventional Commits 1.0.0 reference — consult this when picking type or scope:
 
@@ -156,20 +162,79 @@ const subjectSchema = `{
 		},
 		"description": {
 			"type": "string",
-			"description": "Imperative-mood summary of what changed and why it matters. \"add\", not \"added\". No trailing period."
+			"description": "Imperative-mood summary of what changed and why it matters. Starts with a lowercase letter. \"add\", not \"added\". No trailing period."
 		}
 	},
 	"required": ["type","scope","breaking","description"]
 }`
 
+// subjectAndBodySchema extends subjectSchema with a body field — an array
+// of bullet strings — for --body mode. Bullets are short imperative
+// phrases grounded in the diff; the model must not invent unrelated
+// content. Two-to-six bullets is the sweet spot.
+const subjectAndBodySchema = `{
+	"type": "object",
+	"properties": {
+		"type": {
+			"type": "string",
+			"enum": ["feat","fix","docs","style","refactor","perf","test","build","ci","chore","revert"],
+			"description": "Conventional Commits type — the one that best fits the primary intent of the change"
+		},
+		"scope": {
+			"type": "string",
+			"description": "Single noun for the area touched (package name, module, feature folder). Use empty string when the change spans unrelated areas."
+		},
+		"breaking": {
+			"type": "boolean",
+			"description": "True only when this is a backward-incompatible change"
+		},
+		"description": {
+			"type": "string",
+			"description": "Imperative-mood summary of what changed and why it matters. Starts with a lowercase letter. \"add\", not \"added\". No trailing period."
+		},
+		"body": {
+			"type": "array",
+			"minItems": 1,
+			"maxItems": 6,
+			"items": {
+				"type": "string",
+				"description": "One bullet — a short imperative phrase describing a single concrete change visible in the diff. Starts with a lowercase letter. No leading dash, no trailing period."
+			},
+			"description": "Two to six bullet points expanding the subject. Each bullet describes ONE concrete change present in the staged diff."
+		}
+	},
+	"required": ["type","scope","breaking","description","body"]
+}`
+
+// bodyRules is appended to the system prompt when --body is requested. It
+// tells the model the shape of the bullets and that they must be grounded
+// in the diff, not invented. Kept short so it doesn't crowd out the main
+// rules.
+const bodyRules = `
+
+BODY MODE (additional output requirement):
+You must also emit a "body" field — an array of 2 to 6 short bullet
+strings. Each bullet:
+  * Describes ONE concrete change that is visibly present in the staged
+    diff. Do not invent features, modules, or behavior that is not in
+    the diff.
+  * Is imperative, lowercase-first, no leading dash, no trailing period.
+    Example: "expose /users route", not "- Exposed /users route.".
+  * Is short (target under 72 characters).
+Order bullets from most to least important. If the change is genuinely a
+one-liner with nothing else to add, still produce a single bullet that
+restates the subject in slightly different words rather than padding.`
+
 // ccParts mirrors the JSON schema. The model fills it in; gcg builds the
 // final subject string itself, so formatting drift (capitalization,
-// punctuation) is impossible.
+// punctuation) is impossible. Body is only populated when the request
+// asked for it (--body mode); the rest of the time it's nil.
 type ccParts struct {
-	Type        string `json:"type"`
-	Scope       string `json:"scope"`
-	Breaking    bool   `json:"breaking"`
-	Description string `json:"description"`
+	Type        string   `json:"type"`
+	Scope       string   `json:"scope"`
+	Breaking    bool     `json:"breaking"`
+	Description string   `json:"description"`
+	Body        []string `json:"body,omitempty"`
 }
 
 func (p ccParts) Subject() string {
@@ -179,6 +244,7 @@ func (p ccParts) Subject() string {
 	// "refactor(scope): refactor: implement X" once we assemble. Strip
 	// any leading <type>(<scope>)?!?: pattern from the description.
 	desc = descPrefixRe.ReplaceAllString(desc, "")
+	desc = lowercaseFirst(desc)
 
 	var sb strings.Builder
 	sb.WriteString(p.Type)
@@ -193,6 +259,21 @@ func (p ccParts) Subject() string {
 	sb.WriteString(": ")
 	sb.WriteString(desc)
 	return sb.String()
+}
+
+// lowercaseFirst returns s with its first rune lowercased. Conventional
+// Commits style — and gcg's prompt — wants imperative-mood descriptions
+// like "add user endpoint", not "Add user endpoint". Some models still
+// title-case the first word; this is the last-mile fix.
+func lowercaseFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if !unicode.IsUpper(r) {
+		return s
+	}
+	return string(unicode.ToLower(r)) + s[size:]
 }
 
 var descPrefixRe = regexp.MustCompile(
@@ -238,36 +319,64 @@ func Preflight(ctx context.Context, host, model string) error {
 	return fmt.Errorf("ollama is reachable at %s but model %q is not available locally — run: ollama pull %s", host, model, model)
 }
 
+// Options controls one call to Generate. Zero value gives the historical
+// behavior: subject-only output, default thinking, streaming UI when the
+// stream is a TTY.
+type Options struct {
+	// Body asks the model to also emit a bullet-point body. The returned
+	// Result.Body is the assembled multi-line body (one bullet per line,
+	// prefixed with "- "); empty otherwise.
+	Body bool
+
+	// Think overrides the Ollama thinking level. Valid values: "", "true",
+	// "false", "high", "medium", "low". Empty defaults to true; --body
+	// mode promotes the default to "high" (think more) unless the caller
+	// has set Think explicitly.
+	Think string
+}
+
+// Result is what Generate hands back: the assembled subject line, and an
+// optional body. Body is empty unless Options.Body was set.
+type Result struct {
+	Subject string
+	Body    string
+}
+
 // Generate sends userPrompt to the Ollama instance at host using model and
 // drives a chat loop that handles any tool calls in-process. When stream
 // is a TTY, live thinking content is rendered into a rolling viewport
 // with an embedded spinner; tool invocations are echoed inline. The
-// final subject string is returned — Generate does NOT print it, so the
-// caller owns final-output formatting.
-func Generate(ctx context.Context, host, model, userPrompt string, stream io.Writer) (string, error) {
+// final subject (and optional body) is returned — Generate does NOT print
+// them, so the caller owns final-output formatting.
+func Generate(ctx context.Context, host, model, userPrompt string, stream io.Writer, opts Options) (Result, error) {
 	u, err := url.Parse(host)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("invalid llm.host %q", host)
+		return Result{}, fmt.Errorf("invalid llm.host %q", host)
 	}
 	client := api.NewClient(u, http.DefaultClient)
 
 	apiTools, err := buildOllamaTools()
 	if err != nil {
-		return "", fmt.Errorf("build tools: %w", err)
+		return Result{}, fmt.Errorf("build tools: %w", err)
 	}
 	streamFlag := stream != nil
 
+	sysPrompt := systemPrompt
+	if opts.Body {
+		sysPrompt = systemPrompt + bodyRules
+	}
 	messages := []api.Message{
-		{Role: "system", Content: systemPrompt},
+		{Role: "system", Content: sysPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
 	useUI := stream != nil && term.IsTerminal(stream)
-	think := api.ThinkValue{Value: true}
+	think := resolveThink(opts)
 
 	slog.Debug("llm.Generate start",
 		"model", model, "host", host,
-		"prompt_bytes", len(userPrompt), "tools", len(apiTools), "ui", useUI)
+		"prompt_bytes", len(userPrompt), "tools", len(apiTools), "ui", useUI,
+		"body", opts.Body, "think", fmt.Sprintf("%v", think.Value))
 
 	// Phase 1 — tool use. Format is intentionally NOT set here because in
 	// Ollama's grammar layer it biases the sampler against tool calls
@@ -327,7 +436,7 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 			vp.Stop()
 		}
 		if chatErr != nil {
-			return "", classifyErr(chatErr, model)
+			return Result{}, classifyErr(chatErr, model)
 		}
 
 		if len(toolCalls) == 0 {
@@ -378,19 +487,27 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 	// directly and skip Phase 2. The caller owns presentation of the
 	// final subject.
 	if phase1Done && phase1Content != "" {
-		if subject, err := extractSubject(phase1Content); err == nil {
-			slog.Debug("phase 1 short-circuit", "subject", subject)
-			return subject, nil
+		if parts, fromJSON, err := extractParts(phase1Content, opts.Body); err == nil {
+			res := assembleResult(parts, fromJSON)
+			slog.Debug("phase 1 short-circuit", "subject", res.Subject)
+			return res, nil
 		}
 	}
 	slog.Debug("phase 1 → phase 2", "phase1_done", phase1Done, "phase1_content_bytes", len(phase1Content))
 
 	// Phase 2 — structuring. Format constraint forces a JSON object
-	// matching subjectSchema. Tools are NOT declared here because the
-	// flow has already gathered the context it needs in Phase 1.
+	// matching the appropriate schema. Tools are NOT declared here
+	// because the flow has already gathered the context it needs in
+	// Phase 1.
+	finalSchema := subjectSchema
+	finalInstruction := "Now output ONLY the final JSON object as instructed: a single object with type, scope, breaking, and description. No prose, no tool calls."
+	if opts.Body {
+		finalSchema = subjectAndBodySchema
+		finalInstruction = "Now output ONLY the final JSON object as instructed: a single object with type, scope, breaking, description, and body (an array of 2-6 bullet strings grounded in the diff). No prose, no tool calls."
+	}
 	messages = append(messages, api.Message{
 		Role:    "user",
-		Content: "Now output ONLY the final JSON object as instructed: a single object with type, scope, breaking, and description. No prose, no tool calls.",
+		Content: finalInstruction,
 	})
 
 	var sp *term.Spinner
@@ -403,7 +520,7 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		Model:    model,
 		Messages: messages,
 		Stream:   &streamFlag,
-		Format:   json.RawMessage(subjectSchema),
+		Format:   json.RawMessage(finalSchema),
 		Think:    &think,
 	}
 	chatErr := client.Chat(ctx, req, func(resp api.ChatResponse) error {
@@ -427,15 +544,77 @@ func Generate(ctx context.Context, host, model, userPrompt string, stream io.Wri
 		vp.Stop()
 	}
 	if chatErr != nil {
-		return "", classifyErr(chatErr, model)
+		return Result{}, classifyErr(chatErr, model)
 	}
 	slog.Debug("phase 2 done", "response_bytes", sb.Len())
 
-	subject, err := extractSubject(sb.String())
+	parts, fromJSON, err := extractParts(sb.String(), opts.Body)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
-	return subject, nil
+	return assembleResult(parts, fromJSON), nil
+}
+
+// resolveThink converts opts.Think into the Ollama ThinkValue. Empty
+// defaults to true (default thinking); --body promotes the default to
+// "high" so the model gets more budget to ground its bullets in the
+// diff. An explicit Think wins over the body-mode promotion.
+func resolveThink(opts Options) api.ThinkValue {
+	switch opts.Think {
+	case "":
+		if opts.Body {
+			return api.ThinkValue{Value: "high"}
+		}
+		return api.ThinkValue{Value: true}
+	case "true":
+		return api.ThinkValue{Value: true}
+	case "false":
+		return api.ThinkValue{Value: false}
+	case "high", "medium", "low":
+		return api.ThinkValue{Value: opts.Think}
+	default:
+		slog.Debug("resolveThink: unknown value, falling back to default", "value", opts.Think)
+		if opts.Body {
+			return api.ThinkValue{Value: "high"}
+		}
+		return api.ThinkValue{Value: true}
+	}
+}
+
+// assembleResult builds the user-facing Result from parsed parts: the
+// assembled subject line, plus a "- bullet" body block when bullets were
+// produced. fromJSON is true when parts came from a real JSON parse and
+// should be re-assembled via ccParts.Subject; false when parts came from
+// the regex-fallback path (parts.Description already holds the full
+// "<type>(<scope>)!?: desc" line and must be used verbatim).
+func assembleResult(p ccParts, fromJSON bool) Result {
+	subject := p.Description
+	if fromJSON {
+		subject = p.Subject()
+	}
+	r := Result{Subject: subject}
+	if len(p.Body) == 0 {
+		return r
+	}
+	var sb strings.Builder
+	for i, b := range p.Body {
+		b = strings.TrimSpace(b)
+		b = strings.TrimPrefix(b, "-")
+		b = strings.TrimPrefix(b, "*")
+		b = strings.TrimSpace(b)
+		b = strings.TrimSuffix(b, ".")
+		b = lowercaseFirst(b)
+		if b == "" {
+			continue
+		}
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString("- ")
+		sb.WriteString(b)
+	}
+	r.Body = sb.String()
+	return r
 }
 
 // buildOllamaTools converts the registered MCP tool definitions into the
@@ -496,18 +675,26 @@ func buildOllamaTools() (api.Tools, error) {
 	return out, nil
 }
 
-// extractSubject parses the model's structured-output response into
-// ccParts and assembles the canonical subject string.
+// extractParts parses the model's structured-output response into
+// ccParts. wantBody controls whether the absence of the body array is a
+// hard failure: in --body mode the caller needs bullets, so missing
+// bullets force a retry path; in default mode the body field is
+// ignored.
 //
 // The Format constraint *should* give us a clean JSON object, but in
 // practice models leak around it: markdown code fences (```json ... ```),
 // preamble text, trailing commentary. We try three parse strategies in
 // order — raw, fence-stripped, and brace-bounded — before falling back to
 // scanning for a Conventional-Commits-shaped line.
-func extractSubject(raw string) (string, error) {
+//
+// The bool return is true when the result came from JSON parsing (and
+// should be re-assembled via ccParts.Subject); false when it came from
+// the regex fallback (Description already holds the full assembled line
+// and must be used verbatim).
+func extractParts(raw string, wantBody bool) (ccParts, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", fmt.Errorf("model returned empty response")
+		return ccParts{}, false, fmt.Errorf("model returned empty response")
 	}
 
 	strategies := []string{"raw", "fence-stripped", "object-extracted"}
@@ -520,21 +707,32 @@ func extractSubject(raw string) (string, error) {
 			continue
 		}
 		if !validCCType[parts.Type] {
-			return "", fmt.Errorf("model produced invalid type %q (raw: %q)", parts.Type, raw)
+			return ccParts{}, false, fmt.Errorf("model produced invalid type %q (raw: %q)", parts.Type, raw)
 		}
-		slog.Debug("extractSubject parsed", "strategy", strategies[i])
-		return parts.Subject(), nil
+		if wantBody && len(parts.Body) == 0 {
+			// JSON parsed but the model skipped the body — let the
+			// caller fall through to phase 2 / re-prompt.
+			continue
+		}
+		slog.Debug("extractParts parsed", "strategy", strategies[i], "body_bullets", len(parts.Body))
+		return parts, true, nil
 	}
 
-	// Last resort: a CC-shaped line anywhere in the output.
+	// Last resort: a CC-shaped line anywhere in the output. Body is
+	// unrecoverable from this fallback; if the caller wanted bullets,
+	// surface that as a usability failure instead of returning a subject
+	// without the body the user asked for.
 	for line := range strings.SplitSeq(raw, "\n") {
 		t := strings.TrimSpace(line)
 		if ccSubjectRe.MatchString(t) {
-			slog.Debug("extractSubject parsed", "strategy", "regex-fallback")
-			return t, nil
+			if wantBody {
+				return ccParts{}, false, fmt.Errorf("model returned a subject line but no body (raw: %q)", raw)
+			}
+			slog.Debug("extractParts parsed", "strategy", "regex-fallback")
+			return ccParts{Description: t}, false, nil
 		}
 	}
-	return "", fmt.Errorf("model output is not a usable subject (raw: %q)", raw)
+	return ccParts{}, false, fmt.Errorf("model output is not a usable subject (raw: %q)", raw)
 }
 
 // stripCodeFence removes a leading ```... line and a trailing ``` so a

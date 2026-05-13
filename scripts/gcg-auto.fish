@@ -1,4 +1,4 @@
-function gcg-auto --description "Auto-stage every change, generate a Conventional Commits subject, then git commit -e with it pre-filled"
+function gcg-auto --description "Auto-stage every change, generate a Conventional Commits message, then git commit -e with it pre-filled. Pass --body for a bullet-point body."
     # Outside a git repo: pass through so gcg prints its standard
     # "not in a git work tree" notice.
     if not git rev-parse --is-inside-work-tree >/dev/null 2>&1
@@ -15,21 +15,25 @@ function gcg-auto --description "Auto-stage every change, generate a Conventiona
         return 0
     end
 
-    # Generate the subject. The binary prints to stdout and copies the
-    # cleaned subject to the system clipboard.
-    gcg
+    # --no-clip: gcg's stdout is now the canonical channel for the
+    # commit message; we don't need the clipboard round-trip.
+    # The streaming UI (spinner, thinking viewport, tool calls, pretty
+    # preview) still lands on stderr so the user sees it live.
+    # Forward any caller-supplied flags (e.g. --body, --think=high).
+    set -l msg (gcg --no-clip $argv)
     set -l rc $status
     if test $rc -ne 0
         return $rc
     end
 
-    set -l msg (pbpaste)
     if test -z "$msg"
-        echo (set_color red)"(gcg-auto) clipboard is empty — can't commit"(set_color normal)
+        echo (set_color red)"(gcg-auto) gcg produced no message — can't commit"(set_color normal)
         return 1
     end
 
-    # `-e` opens $EDITOR with the message pre-filled. Save+close to
+    # `-e` opens $EDITOR with the message pre-filled. `-F -` reads the
+    # full message (multi-line body and all) from stdin, which `-m`
+    # can't safely round-trip through a fish variable. Save+close to
     # commit; close empty to abort. The last-mile review is yours.
-    git commit -e -m "$msg"
+    printf '%s\n' $msg | git commit -e -F -
 end
